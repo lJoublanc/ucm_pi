@@ -1,0 +1,10 @@
+{
+  "name": "unison-pi-tool",
+  "version": "0.1.0",
+  "description": "Token-efficient Unison / UCM support for the pi coding agent (no MCP).",
+  "type": "module",
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "skills": ["./skills"]
+  }
+}
