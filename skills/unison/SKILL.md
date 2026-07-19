@@ -29,10 +29,33 @@ code — `unison_update` already typechecks. Fewer calls = fewer tokens.
 |------|---------|
 | `unison_typecheck` | check source without committing |
 | `unison_update` | typecheck + commit in one call (preferred) |
-| `unison_view` | read source of existing definitions |
+| `unison_view` | read (pretty-printed) source of existing definitions |
+| `unison_dump` | read **re-loadable** source of existing definitions (for editing) |
 | `unison_find` | search by name, or `: <type>` for type-directed search |
 | `unison_test` | run the test suite |
+| `unison_status` | show bound codebase, default project, available projects |
 | `unison_ucm` | escape hatch for any other UCM command |
+
+## Targeting a project/branch
+
+Every tool takes an optional `project` argument (e.g. `blas/asum`). It defaults
+to the configured project (`--unison-project` flag / `UNISON_PROJECT` env, else
+`scratch/main`). If results are unexpectedly empty, run `unison_status` first to
+confirm which codebase and project you're actually hitting — a mismatch there is
+the most common cause. For the auto-typecheck on `.u` edits, put a header line
+`-- @unison-project: proj/branch` at the top of the file to target that branch.
+
+## Editing existing definitions & ability changes
+
+- To modify an existing definition, fetch it with **`unison_dump`** (not
+  `unison_view` — the pretty-printer doesn't always round-trip), edit it, then
+  `unison_update`.
+- Adding a constructor to an **ability** makes every handler of that ability
+  non-exhaustive. `unison_update` will then return **incomplete**, including
+  UCM's canonical, re-loadable source for the *entire* affected-definition
+  closure (the `⚠ update incomplete` payload). Add the missing cases to that
+  source and call `unison_update` again to complete the merge. Include the whole
+  closure in one update so no reference to the old ability hash remains.
 
 ## Common `unison_ucm` commands
 
@@ -42,7 +65,7 @@ code — `unison_update` already typechecks. Fewer calls = fewer tokens.
 - `run myMain` — execute a definition
 - `branch /feature`, `switch /main` — branch ops
 - `delete.term foo`, `move.term a b` — edits
-- `project.create`, `projects`, `branches` — project management
+- `project.create`, `projects`, `branches` — project management (or `unison_status` for orientation)
 
 ## Language notes
 

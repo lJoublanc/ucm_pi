@@ -2,19 +2,27 @@
 //
 // Token strategy baked in from the start:
 //   #1 prune stale read-only results from context      -> `context` handler
-//   #2 tiny tool catalog (6 tools, not UCM-MCP's 29)    -> registerTool below
+//   #2 tiny tool catalog                                -> registerTool below
 //   #3 filter/summarize UCM output at the source        -> src/ucm.ts
 //   #4 fewer round trips (composite tools + auto-check)  -> unison_update + hook
 //   #5 knowledge in a skill, not the system prompt       -> skills/unison
 //   #6 cache-friendly: stable prompt, no mid-run churn   -> per-turn injection
+//
+// Every tool accepts an optional `project` (project/branch) so a single session
+// can operate across projects; it falls back to the configured default.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { resolve } from "node:path";
 import { createUcm, type Ucm } from "./ucm.ts";
 import { pruneStaleUnisonResults } from "./prune.ts";
+
+const PROJECT_PARAM = Type.Optional(
+  Type.String({
+    description:
+      "project/branch to target, e.g. `myproject/main`. Defaults to the configured project.",
+  }),
+);
 
 export default function (pi: ExtensionAPI) {
   pi.registerFlag("unison-codebase", {
@@ -22,10 +30,13 @@ export default function (pi: ExtensionAPI) {
     type: "string",
   });
   pi.registerFlag("unison-project", {
-    description: "project/branch transcripts run against (deps must resolve here)",
+    description: "Default project/branch operations run against (deps must resolve here)",
     type: "string",
     default: "",
   });
+
+  const defaultProject = () =>
+    (pi.getFlag("unison-project") as string) || process.env.UNISON_PROJECT || "scratch/main";
 
   let ucm: Ucm | undefined;
   const getUcm = (): Ucm => {
@@ -34,10 +45,7 @@ export default function (pi: ExtensionAPI) {
         exec: (cmd, args, opts) => pi.exec(cmd, args, opts),
         codebase:
           (pi.getFlag("unison-codebase") as string) || process.env.UNISON_CODEBASE || undefined,
-        project:
-          (pi.getFlag("unison-project") as string) ||
-          process.env.UNISON_PROJECT ||
-          "scratch/main",
+        project: defaultProject(),
         timeoutMs: 120_000,
       });
     }
@@ -48,7 +56,9 @@ export default function (pi: ExtensionAPI) {
     if (r.isError) throw new Error(r.text); // sets isError + reports to LLM
     return { content: [{ type: "text" as const, text: r.text }], details: r.details };
   };
-  // Non-throwing variant that still carries pruneKey into details for #1.
+  // Non-throwing variant: delivers content (and isError) rather than throwing,
+  // so rich payloads — an update's affected-definition dump, a failed query —
+  // reach the model intact. Carries pruneKey into details for #1.
   const toResultKeyed = (r: Awaited<ReturnType<Ucm["typecheck"]>>) => ({
     content: [{ type: "text" as const, text: r.text }],
     details: { ...r.details, pruneKey: r.pruneKey },
@@ -69,10 +79,11 @@ export default function (pi: ExtensionAPI) {
       scratchPath: Type.Optional(
         Type.String({ description: "Scratch file this code belongs to (for de-duplication)" }),
       ),
+      project: PROJECT_PARAM,
     }),
     async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
       const key = `typecheck:${params.scratchPath ? resolve(ctx.cwd, params.scratchPath) : "inline"}`;
-      return toResultKeyed(await getUcm().typecheck(params.code, key, signal));
+      return toResultKeyed(await getUcm().typecheck(params.code, key, signal, params.project));
     },
   });
 
@@ -81,13 +92,19 @@ export default function (pi: ExtensionAPI) {
     label: "Unison Update",
     description:
       "Typecheck AND commit Unison source to the codebase in one step. " +
-      "Prefer this over separate typecheck+add/update calls.",
+      "Prefer this over separate typecheck+add/update calls. If the change makes " +
+      "existing definitions non-exhaustive (e.g. adding an ability constructor), " +
+      "the result includes UCM's canonical source for every affected definition — " +
+      "fix those and call unison_update again to complete the merge.",
     promptSnippet: "Typecheck and commit Unison definitions to the codebase in one call",
     parameters: Type.Object({
       code: Type.String({ description: "Unison source to add/update in the codebase" }),
+      project: PROJECT_PARAM,
     }),
     async execute(_id, params, signal) {
-      return toResult(await getUcm().update(params.code, signal));
+      // Non-throwing: an incomplete update returns the affected-definition dump
+      // as content the model must act on, not a bare error string.
+      return toResultKeyed(await getUcm().update(params.code, signal, params.project));
     },
   });
 
@@ -100,10 +117,41 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "View the source of Unison definitions stored in the codebase",
     parameters: Type.Object({
       names: Type.String({ description: "Space-separated definition names to view" }),
+      project: PROJECT_PARAM,
     }),
     async execute(_id, params, signal) {
       return toResultKeyed(
-        await getUcm().query(`view ${params.names}`, `view:${params.names.trim()}`, signal),
+        await getUcm().query(
+          `view ${params.names}`,
+          `view:${params.project ?? ""}:${params.names.trim()}`,
+          signal,
+          params.project,
+        ),
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "unison_dump",
+    label: "Unison Dump",
+    description:
+      "Dump canonical, RE-LOADABLE source of existing definitions (via `edit.new`). " +
+      "Unlike unison_view's pretty-printer, this output round-trips cleanly through " +
+      "unison_update — use it when you need to edit an existing definition and commit " +
+      "it back. Accepts space-separated names.",
+    promptSnippet: "Dump re-loadable source of existing definitions for editing",
+    parameters: Type.Object({
+      names: Type.String({ description: "Space-separated definition names to dump" }),
+      project: PROJECT_PARAM,
+    }),
+    async execute(_id, params, signal) {
+      return toResultKeyed(
+        await getUcm().dump(
+          params.names,
+          `dump:${params.project ?? ""}:${params.names.trim()}`,
+          signal,
+          params.project,
+        ),
       );
     },
   });
@@ -117,10 +165,13 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Search the Unison codebase for definitions by name or type",
     parameters: Type.Object({
       query: Type.String({ description: "Name fragment, or `: Nat -> Nat` for type search" }),
+      project: PROJECT_PARAM,
     }),
     async execute(_id, params, signal) {
       const q = params.query.trim();
-      return toResultKeyed(await getUcm().query(`find ${q}`, `find:${q}`, signal));
+      return toResultKeyed(
+        await getUcm().query(`find ${q}`, `find:${params.project ?? ""}:${q}`, signal, params.project),
+      );
     },
   });
 
@@ -129,9 +180,23 @@ export default function (pi: ExtensionAPI) {
     label: "Unison Test",
     description: "Run the project's test suite and return the results.",
     promptSnippet: "Run the Unison project's tests",
+    parameters: Type.Object({ project: PROJECT_PARAM }),
+    async execute(_id, params, signal) {
+      return toResult(await getUcm().test(signal, params.project));
+    },
+  });
+
+  pi.registerTool({
+    name: "unison_status",
+    label: "Unison Status",
+    description:
+      "Show which codebase and default project/branch the Unison tools are bound to, " +
+      "plus the list of projects in the codebase. Use this to orient before other tools " +
+      "if targeting seems wrong (e.g. results are unexpectedly empty).",
+    promptSnippet: "Show the bound codebase, default project, and available projects",
     parameters: Type.Object({}),
     async execute(_id, _params, signal) {
-      return toResult(await getUcm().test(signal));
+      return toResult(await getUcm().status(signal));
     },
   });
 
@@ -140,15 +205,16 @@ export default function (pi: ExtensionAPI) {
     label: "UCM Command",
     description:
       "Escape hatch: run raw UCM command(s) (e.g. `lib.install @unison/base`, `merge /topic`, " +
-      "`docs List.map`, `run myMain`, `delete.term foo`). One command per array entry.",
+      "`branches`, `docs List.map`, `run myMain`, `delete.term foo`). One command per array entry.",
     promptSnippet: "Run raw UCM commands for operations the dedicated tools do not cover",
     parameters: Type.Object({
       commands: Type.Array(Type.String(), {
         description: "UCM commands to run in sequence, without the project/branch prompt prefix",
       }),
+      project: PROJECT_PARAM,
     }),
     async execute(_id, params, signal) {
-      return toResult(await getUcm().raw(params.commands, signal));
+      return toResult(await getUcm().raw(params.commands, signal, params.project));
     },
   });
 
@@ -158,6 +224,8 @@ export default function (pi: ExtensionAPI) {
   // ---- #4: auto-typecheck on .u edits (saves a whole round trip) ----------
   // When the model writes/edits a scratch file, append fresh diagnostics to the
   // edit result so it never needs a separate turn (and context re-send) to check.
+  // A leading `-- @unison-project: proj/branch` line in the file targets that
+  // branch (so the file resolves against the right dependencies).
   pi.on("tool_result", async (event, ctx) => {
     if (event.toolName !== "write" && event.toolName !== "edit") return;
     const path = (event.input as { path?: string })?.path;
@@ -166,11 +234,18 @@ export default function (pi: ExtensionAPI) {
       const abs = resolve(ctx.cwd, path);
       const { readFile } = await import("node:fs/promises");
       const code = await readFile(abs, "utf8");
-      const diag = await getUcm().typecheck(code, `typecheck:${abs}`, ctx.signal);
+      const header = code.match(/^\s*--\s*@unison-project:\s*(\S+)/m);
+      const diag = await getUcm().typecheck(
+        code,
+        `typecheck:${abs}`,
+        ctx.signal,
+        header?.[1],
+      );
+      const proj = header?.[1] ?? defaultProject();
       return {
         content: [
           ...event.content,
-          { type: "text", text: `\n── unison typecheck (${path}) ──\n${diag.text}` },
+          { type: "text", text: `\n── unison typecheck (${path} @ ${proj}) ──\n${diag.text}` },
         ],
       };
     } catch {
@@ -180,17 +255,20 @@ export default function (pi: ExtensionAPI) {
 
   // ---- #6: per-turn branch status via footer, not the system prompt ------
   pi.on("session_start", (_event, ctx) => {
-    const project =
-      (pi.getFlag("unison-project") as string) || process.env.UNISON_PROJECT || "scratch/main";
-    ctx.ui.setStatus("unison", `⬡ ${project}`);
+    const d = getUcm().describe();
+    ctx.ui.setStatus("unison", `⬡ ${d.project}`);
   });
 
   // ---- manual entry point for the human ----------------------------------
   pi.registerCommand("ucm", {
-    description: "Run a raw UCM command",
+    description: "Run a raw UCM command (optionally `@project/branch <command>`)",
     handler: async (args, ctx) => {
-      if (!args.trim()) return void ctx.ui.notify("usage: /ucm <command>", "warning");
-      const r = await getUcm().raw([args.trim()], ctx.signal);
+      const trimmed = args.trim();
+      if (!trimmed) return void ctx.ui.notify("usage: /ucm [@project/branch] <command>", "warning");
+      const m = trimmed.match(/^@(\S+)\s+(.*)$/);
+      const project = m?.[1];
+      const command = m?.[2] ?? trimmed;
+      const r = await getUcm().raw([command], ctx.signal, project);
       ctx.ui.notify(r.text.slice(0, 2000), r.isError ? "error" : "info");
     },
   });
