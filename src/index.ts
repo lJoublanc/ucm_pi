@@ -14,7 +14,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolve } from "node:path";
-import { createUcm, type Ucm } from "./ucm.ts";
+import { createUcm, detectCurrentProject, type Ucm } from "./ucm.ts";
 import { pruneStaleUnisonResults } from "./prune.ts";
 
 const PROJECT_PARAM = Type.Optional(
@@ -35,17 +35,34 @@ export default function (pi: ExtensionAPI) {
     default: "",
   });
 
-  const defaultProject = () =>
-    (pi.getFlag("unison-project") as string) || process.env.UNISON_PROJECT || "scratch/main";
+  // Default-project resolution chain. Each call re-evaluates so a `switch`
+  // issued via `unison_ucm` (or by the user in an interactive UCM) is picked
+  // up on the next tool call: UCM writes the new project to the codebase's
+  // `current_project_path` SQLite table, and we read that table here.
+  //
+  //   1. `--unison-project` flag (explicit, wins)
+  //   2. `UNISON_PROJECT` env var       (explicit, wins)
+  //   3. UCM's current project context  (auto-detected from SQLite)
+  //   4. `"scratch/main"`               (final fallback)
+  const codebasePath = (): string | undefined =>
+    (pi.getFlag("unison-codebase") as string) || process.env.UNISON_CODEBASE || undefined;
+  const defaultProject = (): string => {
+    const explicit =
+      (pi.getFlag("unison-project") as string) || process.env.UNISON_PROJECT;
+    if (explicit?.trim()) return explicit.trim();
+    const detected = detectCurrentProject(codebasePath());
+    return detected ?? "scratch/main";
+  };
 
   let ucm: Ucm | undefined;
   const getUcm = (): Ucm => {
     if (!ucm) {
       ucm = createUcm({
         exec: (cmd, args, opts) => pi.exec(cmd, args, opts),
-        codebase:
-          (pi.getFlag("unison-codebase") as string) || process.env.UNISON_CODEBASE || undefined,
-        project: defaultProject(),
+        codebase: codebasePath(),
+        // Thunk, so each tool call re-reads the current project from SQLite
+        // (and so a `switch` mid-session lands on the right branch next time).
+        project: defaultProject,
         timeoutMs: 120_000,
       });
     }

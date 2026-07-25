@@ -104,12 +104,25 @@ during the edit loop.
 
 ## Targeting a project/branch
 
-Every tool takes an optional `project` argument (e.g. `blas/asum`). It defaults
-to the configured project (`--unison-project` flag / `UNISON_PROJECT` env, else
-`scratch/main`). If results are unexpectedly empty, run `unison_status` first to
-confirm which codebase and project you're actually hitting — a mismatch there is
-the most common cause. For the auto-typecheck on `.u` edits, put a header line
-`-- @unison-project: proj/branch` at the top of the file to target that branch.
+The `project` argument to each tool is optional. When omitted, the default
+is resolved in this order, on **every call** (so a `switch` issued mid-session
+is picked up automatically):
+
+1. `--unison-project` flag / `UNISON_PROJECT` env var (explicit, wins).
+2. **UCM's current project context** — read from the codebase's
+   `current_project_path` SQLite table. This is the project/branch the user
+   most recently navigated to via `switch`, `cd`, or `popd` in their
+   interactive UCM session. The UCM MCP server uses the same mechanism.
+3. `"scratch/main"` (final fallback).
+
+So in the common case — the user has been working in UCM and now wants help
+with whatever branch they were last on — there is no need to pass `project`
+at all. For the auto-typecheck on `.u` edits, a leading header line
+`-- @unison-project: proj/branch` overrides steps 1 and 2 for that file.
+
+If results are unexpectedly empty, run `unison_status` to confirm which
+codebase and project are actually being hit. (`codebase` defaults to
+`~/.unison/v2/`; override with `--unison-codebase` / `UNISON_CODEBASE`.)
 
 ## Editing existing definitions & ability changes
 

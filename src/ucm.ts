@@ -15,7 +15,9 @@
 // the wrong project.
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_MAX_BYTES,
@@ -23,6 +25,11 @@ import {
   formatSize,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
+
+// `node:sqlite` is experimental in Node 22, stable in 23. Loaded lazily so
+// a missing module just degrades to "no auto-detection" instead of crashing
+// at import time.
+const localRequire = createRequire(import.meta.url);
 
 export interface ExecFn {
   (
@@ -36,8 +43,14 @@ export interface UcmConfig {
   exec: ExecFn;
   /** Absolute path to a codebase, or undefined to use UCM's default codebase. */
   codebase?: string;
-  /** Default project/branch operations run against when a call omits one. */
-  project: string;
+  /**
+   * Default project/branch operations run against when a call omits one.
+   * May be a string (captured once) or a thunk (re-evaluated each call —
+   * useful when the source can change, e.g. UCM's `current_project_path`
+   * table after a `switch`). An empty / nullish return from the thunk
+   * falls back to `"scratch/main"`.
+   */
+  project: string | (() => string | null | undefined);
   timeoutMs: number;
 }
 
@@ -50,6 +63,71 @@ export interface UcmResult {
   /** Stable key for context de-duplication (see prune.ts). Read-only tools only. */
   pruneKey?: string;
   details: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Current-project detection from the UCM codebase
+// ---------------------------------------------------------------------------
+//
+// UCM stores the user's "current project context" (the project/branch they most
+// recently navigated to via `switch`, `cd`, or `popd`) in a single-row SQLite
+// table at <codebase>/.unison/v2/unison.sqlite3. This is exactly what the UCM
+// MCP server's `currentProjectContext` helper reads.
+//
+// Reading it directly lets us avoid the `--unison-project` flag in the common
+// case where the user has already been working in UCM. Always best-effort: any
+// failure (no file, no row, locked DB, no `node:sqlite`) returns null so the
+// caller can fall back to its other strategies.
+
+/** Path to the SQLite database for the given codebase root, or null if not
+ *  derivable. Matches UCM's `makeCodebasePath` (parser-typechecker/.../Paths.hs):
+ *  `<root>/.unison/v2/unison.sqlite3`. An explicit `.sqlite3` path is used as-is. */
+function resolveCodebaseSqlitePath(codebasePath?: string): string | null {
+  if (!codebasePath) return join(homedir(), ".unison", "v2", "unison.sqlite3");
+  if (codebasePath.endsWith(".sqlite3")) return codebasePath;
+  if (codebasePath.endsWith(".unison") || codebasePath.endsWith(".unison/v2"))
+    return join(codebasePath, "unison.sqlite3");
+  return join(codebasePath, ".unison", "v2", "unison.sqlite3");
+}
+
+/**
+ * Read the UCM codebase's `current_project_path` table and return the
+ * current project/branch in `proj/branch` form, or null if it can't be
+ * determined. Safe to call repeatedly: the whole thing is wrapped in
+ * try/catch and the SQLite handle is closed in `finally`.
+ */
+export function detectCurrentProject(codebasePath?: string): string | null {
+  const dbPath = resolveCodebaseSqlitePath(codebasePath);
+  if (!dbPath || !existsSync(dbPath)) return null;
+  let db: { close: () => void; prepare: (sql: string) => { get: () => unknown } } | null = null;
+  try {
+    const sqlite = localRequire("node:sqlite") as {
+      DatabaseSync: new (
+        path: string,
+        opts?: { readOnly?: boolean },
+      ) => { close: () => void; prepare: (sql: string) => { get: () => unknown } };
+    };
+    db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    const row = db
+      .prepare(
+        `SELECT p.name || '/' || pb.name AS pp
+         FROM current_project_path cpp
+         JOIN project p       ON cpp.project_id = p.id
+         JOIN project_branch pb ON cpp.project_id = pb.project_id
+                              AND cpp.branch_id = pb.branch_id
+         LIMIT 1`,
+      )
+      .get() as { pp?: string } | undefined;
+    return row?.pp ?? null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,12 +311,22 @@ export function createUcm(config: UcmConfig) {
     return { text: content || "(no output)", isError, fullOutputPath, details: {}, ...extra };
   }
 
-  const target = (project?: string) => project?.trim() || defaultProject;
+  /** Resolve the project for a call: explicit arg → defaultProject thunk → "scratch/main". */
+  const target = (project?: string): string => {
+    const explicit = project?.trim();
+    if (explicit) return explicit;
+    const def = typeof defaultProject === "function" ? defaultProject() : defaultProject;
+    return (def ?? "").trim() || "scratch/main";
+  };
 
   return {
     /** The resolved codebase + default project, for status/introspection. */
     describe() {
-      return { codebase: codebase ?? "(UCM default)", project: defaultProject };
+      const def = typeof defaultProject === "function" ? defaultProject() : defaultProject;
+      return {
+        codebase: codebase ?? "(UCM default)",
+        project: (def ?? "").trim() || "scratch/main",
+      };
     },
 
     /** Typecheck source without committing, against `project` (or the default). */
