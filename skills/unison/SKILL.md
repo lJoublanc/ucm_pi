@@ -76,9 +76,12 @@ the `unison_test` flow with a `test>` watch instead.
 
 ### `unison_test`
 
-`unison_test` runs the **already-committed** test suite. The first run after
-any change may report cached results from the previous version of the
-codebase — clear the cache before re-running:
+`unison_test` runs the **already-committed** test suite. The cache is
+per-branch and per-codebase change — it becomes stale whenever definitions
+in the targeted branch are added, removed, or modified. **Treat stale cache
+as a real failure mode:** a green checkmark after editing can come from the
+*previous* version of the term and silently mask a broken change. Clear the
+cache before re-running when verifying an edit:
 
 ```
 unison_ucm: debug.clear-cache
@@ -124,6 +127,19 @@ If results are unexpectedly empty, run `unison_status` to confirm which
 codebase and project are actually being hit. (`codebase` defaults to
 `~/.unison/v2/`; override with `--unison-codebase` / `UNISON_CODEBASE`.)
 
+### Finding which branch holds a definition
+
+Before editing a definition, locate it with a **subpath search** —
+`unison_find math.InnerProductSpace` (or any name fragment). The result
+tells you which project/branch actually contains it. Switch to that branch
+with `unison_ucm` (`switch proj/branch`) before typechecking; otherwise
+every reference to that definition will fail with
+`I couldn't figure out what <name> refers to here`, and you'll waste time
+chasing ambiguity errors that are really just branch-mismatch errors.
+
+This matters most when the default branch is `scratch/main` but the relevant
+code lives in a project branch (e.g. `blas/asum`).
+
 ## Editing existing definitions & ability changes
 
 - To modify an existing definition, fetch it with **`unison_dump`** (not
@@ -135,6 +151,28 @@ codebase and project are actually being hit. (`codebase` defaults to
   closure (the `⚠ update incomplete` payload). Add the missing cases to that
   source and call `unison_update` again to complete the merge. Include the whole
   closure in one update so no reference to the old ability hash remains.
+
+## Scratch file structure: the `---` separator
+
+A `.u` scratch file has two regions, separated by a line containing exactly
+`---` (with optional whitespace). **Everything above the `---` is parsed
+as Unison definitions; everything below is treated as a free-form comment
+and ignored** by both the typechecker and `update`.
+
+In practice:
+
+- Put the definitions you want typechecked and (optionally) committed at
+  the **top**.
+- Use the bottom for notes, scratch ability declarations, exploratory
+  examples, or anything else that should not affect the codebase.
+- References from above the `---` to names defined below it will fail to
+  resolve — the same way any out-of-file reference would. The bottom region
+  is *not* in scope for the top region.
+
+This is one of the easiest things to get wrong: an `ability` or helper that
+sits below `---` looks like it should be available, but isn't. If the
+typechecker reports an unresolved name for a definition that *is* in the
+file, scroll past the `---` — that definition is in the comment region.
 
 ## Common `unison_ucm` commands
 
