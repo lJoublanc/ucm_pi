@@ -174,12 +174,43 @@ code lives in a project branch (e.g. `blas/asum`).
 - To modify an existing definition, fetch it with **`unison_dump`** (not
   `unison_view` — the pretty-printer doesn't always round-trip), edit it, then
   `unison_update`.
-- Adding a constructor to an **ability** makes every handler of that ability
-  non-exhaustive. `unison_update` will then return **incomplete**, including
-  UCM's canonical, re-loadable source for the *entire* affected-definition
-  closure (the `⚠ update incomplete` payload). Add the missing cases to that
-  source and call `unison_update` again to complete the merge. Include the whole
-  closure in one update so no reference to the old ability hash remains.
+- **Pin the explicit type signature** whenever you edit a definition that has
+  callers. `unison_dump` includes it — keep it. If you drop the signature,
+  inference may **narrow** it (lose an ability or a parameter), which silently
+  breaks every dependent and turns a one-line edit into an incomplete update.
+
+### When `unison_update` returns `⚠ update incomplete`
+
+An update can't be applied automatically when it would stop existing
+**dependents** from typechecking. Two causes:
+
+1. The edited definition's **signature changed** (often narrowed by inference —
+   see above), breaking its callers.
+2. You added a constructor to an **ability**, making its handlers non-exhaustive.
+
+In both cases `unison_update`:
+
+- **rolls the working branch back** to a clean state (it cancels the pending
+  merge and deletes the temporary `update-<branch>` branch UCM created) — so
+  **nothing is committed** and you can safely retry, and
+- returns the **full affected-definition closure** as canonical, re-loadable
+  `unison` source in the payload.
+
+To finish: fix that source (restore the signature / add the missing cases) and
+call `unison_update` **once** with your change *and every affected dependent
+together*, so no reference to the old hash remains.
+
+**Do not** chase the `/tmp/pi-ucm-*/code.u` path from UCM's raw message and
+**do not** `merge` a leftover `update-*` branch — that temp branch has the
+dependents *removed*, so merging it **deletes** them (this is a real data-loss
+footgun). The `update-*` branches are UCM's staging area, not something to merge.
+
+### Recovering a deleted definition
+
+If a definition disappears (e.g. a bad `merge` of an `update-*` branch), find a
+branch that still has it with `unison_ucm ["debug.find.global <name>"]`, then
+`unison_view`/`unison_dump` it from that branch and re-add it with
+`unison_update`. Backup branches (e.g. `*_backup_*`) are good candidates.
 
 ## Scratch file structure: the `---` separator
 

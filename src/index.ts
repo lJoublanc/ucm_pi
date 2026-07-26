@@ -109,10 +109,14 @@ export default function (pi: ExtensionAPI) {
     label: "Unison Update",
     description:
       "Typecheck AND commit Unison source to the codebase in one step. " +
-      "Prefer this over separate typecheck+add/update calls. If the change makes " +
-      "existing definitions non-exhaustive (e.g. adding an ability constructor), " +
-      "the result includes UCM's canonical source for every affected definition — " +
-      "fix those and call unison_update again to complete the merge.",
+      "Prefer this over separate typecheck+add/update calls. If the change would " +
+      "break existing dependents (a narrowed type signature, or an ability that " +
+      "gained a constructor), the commit is ROLLED BACK automatically and the " +
+      "result includes UCM's canonical re-loadable source for every affected " +
+      "definition — fix those and resubmit them together with your change in one " +
+      "unison_update call. When editing a definition that has callers, pin its " +
+      "original explicit signature (get it via unison_dump) to avoid inference " +
+      "silently narrowing it.",
     promptSnippet: "Typecheck and commit Unison definitions to the codebase in one call",
     parameters: Type.Object({
       code: Type.String({ description: "Unison source to add/update in the codebase" }),

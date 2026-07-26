@@ -243,6 +243,21 @@ function addedByUcm(md: string): string {
   return b ? b.body.trim() : "";
 }
 
+// Phrases UCM prints when `update` can't finish automatically because existing
+// dependents would no longer typecheck. In that case UCM stages the change on a
+// temporary `update-<branch>` branch, leaves the working branch mid-merge, and
+// rewrites the loaded scratch file with the full affected-definition closure.
+// This happens for BOTH a narrowed term signature (breaks callers) and an
+// ability gaining a constructor (makes handlers non-exhaustive).
+const INCOMPLETE_UPDATE_MARKERS = [
+  "I couldn't complete the update",
+  "added the affected definitions",
+  "created a temporary branch",
+];
+function isIncompleteUpdate(md: string): boolean {
+  return INCOMPLETE_UPDATE_MARKERS.some((m) => md.includes(m));
+}
+
 function newDefinitions(md: string): string[] {
   const defs: string[] = [];
   for (const line of md.split("\n")) {
@@ -264,17 +279,23 @@ export function createUcm(config: UcmConfig) {
     code?: string;
     /** UCM commands (prompt prefix added automatically), run after any `load`. */
     commands?: string[];
+    /** Read the loaded `.u` file back after the run. UCM rewrites it in place
+     *  when `update` can't finish (staging the affected-definition closure);
+     *  we must recover that content BEFORE the temp dir is deleted. */
+    captureRewrite?: boolean;
     signal?: AbortSignal;
   }
 
-  async function runTranscript(opts: RunOpts): Promise<{ ok: boolean; md: string }> {
+  async function runTranscript(
+    opts: RunOpts,
+  ): Promise<{ ok: boolean; md: string; rewrittenCode?: string }> {
     const dir = await mkdtemp(join(tmpdir(), "pi-ucm-"));
     const src = join(dir, "t.md");
     const out = join(dir, "t.output.md");
+    const codePath = join(dir, "code.u");
     try {
       const prompts: string[] = [];
       if (opts.code !== undefined) {
-        const codePath = join(dir, "code.u");
         await writeFile(codePath, opts.code.replace(/\s+$/, "") + "\n", "utf8");
         prompts.push(`${opts.project}> load ${codePath}`);
       }
@@ -284,9 +305,43 @@ export function createUcm(config: UcmConfig) {
       const args = [...(codebase ? ["-c", codebase] : []), "transcript.in-place", src];
       await exec("ucm", args, { signal: opts.signal, timeout: timeoutMs });
       const md = await readFile(out, "utf8").catch(() => "");
-      return { ok: md !== "" && !md.includes(FAILED), md };
+      // Recover the (possibly UCM-rewritten) scratch file while it still exists.
+      // If `update` couldn't complete, UCM writes the affected-definition closure
+      // back into this file — the single `readFile` that used to be missing, so
+      // the closure was `rm -rf`'d in `finally` before the agent could see it.
+      let rewrittenCode: string | undefined;
+      if (opts.code !== undefined && opts.captureRewrite) {
+        const after = (await readFile(codePath, "utf8").catch(() => "")).replace(/\s+$/, "");
+        if (after && after !== opts.code.replace(/\s+$/, "")) rewrittenCode = after;
+      }
+      return { ok: md !== "" && !md.includes(FAILED), md, rewrittenCode };
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** Best-effort rollback of a failed `update`: abort the pending merge on the
+   *  working branch and delete the temporary `update-<branch>` branch(es) UCM
+   *  created, so the codebase is left clean and repeated attempts don't stack up
+   *  orphaned branches. Each step is its own transcript so one failing (e.g. a
+   *  branch that isn't there) never aborts the rest. */
+  async function cleanupPendingUpdate(proj: string, signal?: AbortSignal): Promise<void> {
+    const branch = proj.includes("/") ? proj.slice(proj.indexOf("/") + 1) : proj;
+    await runTranscript({ project: proj, commands: ["cancel"], signal }).catch(() => {});
+    const listed = await runTranscript({ project: proj, commands: ["branches"], signal }).catch(
+      () => ({ ok: false, md: "" }) as { ok: boolean; md: string },
+    );
+    if (!listed.ok) return;
+    const prefix = `update-${branch}`;
+    const names = new Set<string>();
+    for (const line of ucmOutput(listed.md).split("\n")) {
+      const m = line.match(/^\s*\d+\.\s+(\S+)/);
+      if (m && (m[1] === prefix || m[1].startsWith(prefix + "-"))) names.add(m[1]);
+    }
+    for (const name of names) {
+      await runTranscript({ project: proj, commands: [`delete.branch /${name}`], signal }).catch(
+        () => {},
+      );
     }
   }
 
@@ -349,38 +404,57 @@ export function createUcm(config: UcmConfig) {
     },
 
     /** Typecheck + commit in ONE transcript (one round trip, strategy #4).
-     * On a partial failure UCM leaves the affected definitions to be fixed; we
-     * surface that canonical, re-loadable source so the caller can edit and
-     * re-run instead of reconstructing it by hand. */
+     * When `update` can't finish because dependents would break, UCM stages the
+     * change on a temporary branch, rewrites the loaded scratch file with the
+     * affected-definition closure, and leaves the working branch mid-merge. We
+     * recover that closure (before the temp dir is deleted), ROLL BACK the
+     * working branch to a clean state, and hand the caller re-loadable source
+     * plus the likely cause — rather than a success-looking message that points
+     * at an already-deleted file. */
     async update(code: string, signal?: AbortSignal, project?: string): Promise<UcmResult> {
       return serialize(async () => {
         const proj = target(project);
-        const { ok, md } = await runTranscript({
+        const { ok, md, rewrittenCode } = await runTranscript({
           project: proj,
           code,
           commands: ["update"],
+          captureRewrite: true,
           signal,
         });
+
+        // Incomplete update (checked FIRST, regardless of `ok`): UCM couldn't
+        // apply the change automatically. Recover the closure, then undo the
+        // half-finished merge so retries start from a clean branch.
+        const dump = addedByUcm(md);
+        if (isIncompleteUpdate(md) || dump) {
+          const closure = rewrittenCode || dump;
+          await cleanupPendingUpdate(proj, signal);
+          const text =
+            `⚠ update incomplete on ${proj}: some existing definitions would no ` +
+            `longer typecheck after this change, so NOTHING was committed. The ` +
+            `working branch has been rolled back to a clean state (pending merge ` +
+            `cancelled, temporary \`update-*\` branch removed).\n\n` +
+            `Two common causes:\n` +
+            `  • The edited definition's TYPE SIGNATURE changed — often narrowed by ` +
+            `inference (a dropped ability or parameter) — which breaks its callers. ` +
+            `Retrieve the ORIGINAL signature with unison_dump and pin it explicitly.\n` +
+            `  • You added a constructor to an ability, making its handlers ` +
+            `non-exhaustive (add the missing cases).\n\n` +
+            `Fix the source below and resubmit EVERY affected definition together in ` +
+            `one unison_update call:\n\n` +
+            (closure
+              ? "```unison\n" + closure + "\n```"
+              : `(UCM did not emit the affected-definition source; run unison_dump ` +
+                `on the broken dependents to retrieve re-loadable versions.)`);
+          return finalize(text, true);
+        }
+
         if (ok) {
           const defs = newDefinitions(md);
           const summary = defs.length
             ? `✓ Committed to ${proj}. ${defs.length} definition(s):\n  ${defs.join("\n  ")}`
             : ucmOutput(md) || `✓ update applied to ${proj}.`;
           return finalize(summary, false);
-        }
-        const dump = addedByUcm(md);
-        if (dump) {
-          const text =
-            `⚠ update incomplete on ${proj}: some existing definitions no longer ` +
-            `typecheck after this change (e.g. an ability gained a constructor, so ` +
-            `its handlers are non-exhaustive). UCM staged the change on a temporary ` +
-            `branch and wrote the FULL affected-definition closure below — this is ` +
-            `canonical, re-loadable source. Fix it (add the missing cases, etc.) and ` +
-            `call unison_update again with the corrected source to complete the merge.\n\n` +
-            "```unison\n" +
-            dump +
-            "\n```";
-          return finalize(text, true);
         }
         return finalize(errorText(md), true);
       });
