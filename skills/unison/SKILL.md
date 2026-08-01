@@ -29,7 +29,9 @@ Only *scratch* files (`*.u`) are real files you edit.
 2. Fix until it typechecks. For inline snippets, call `unison_typecheck`.
 3. Stop there by default. **Commit with `unison_update` only when the user
    explicitly asks** for the change to land in the codebase; it typechecks
-   **and** adds/updates in one step.
+   **and** adds/updates in one step. If the source is already in a scratch
+   file, pass `scratchPath` instead of `code` — re-sending the file contents
+   inline wastes tokens.
 4. **To learn whether tests pass** you must commit and run `unison_test` —
    typechecking alone never reports pass/fail (see [Testing](#testing)). Since
    this requires a commit, get the user's go-ahead first.
@@ -42,8 +44,9 @@ code — `unison_update` already typechecks. Fewer calls = fewer tokens.
 **Read this first — typechecking does NOT run tests.** Every tool here executes
 a UCM *transcript* and returns only a *filtered* summary of its output (see
 [How output is produced](#how-output-is-produced)). On a **successful**
-`unison_typecheck` / `unison_update` you get a `name : type` definition summary
-— **not** the evaluated result of any `test>` watch. A red test still
+`unison_typecheck` / `unison_update` you get a summary of the added (`+`) and
+modified (`~`) definition **names** — **not** the evaluated result of any
+`test>` watch. A red test still
 typechecks, so `unison_typecheck` will report `✓ Typechecks` for a test that is
 failing. **`unison_typecheck` cannot tell you whether a test passes.**
 
@@ -114,9 +117,11 @@ fenced blocks), runs it with `ucm transcript.in-place`, and parses the clean
 `*.output.md` — returning only a *filtered* slice to you, not UCM's full
 console output. Practical consequences:
 
-- `unison_typecheck` / `unison_update` surface a `name : type` **definition
-  summary** on success; they drop everything else, including `test>` watch
-  results and other evaluated-watch output. Use `unison_test` (or a `run`
+- `unison_typecheck` / `unison_update` surface a **summary of added/modified
+  definition names** (`+`/`~`, no signatures — you already know them, you just
+  submitted the source) on success; they drop everything else, including
+  `test>` watch results and other evaluated-watch output. Check that every
+  definition you meant to change is listed, under the right marker. Use `unison_test` (or a `run`
   thunk via `unison_ucm`) when you need evaluated output.
 - Prompt-echo lines (`proj/branch> cmd`) are stripped, and long output is
   truncated with a pointer to a full-output file on disk.
@@ -240,7 +245,9 @@ file, scroll past the `---` — that definition is in the comment region.
 - `merge /topic` / `merge.commit` — branch merges
 - `docs List.map` — render a definition's docs
 - `run myMain` — execute a definition
-- `branch /feature`, `switch /main` — branch ops
+- `branch feature` — create a branch off the **current** branch;
+  `branch /main feature` — create `feature` off `/main`. (There is no
+  `branch.create-from`.) `switch /main` — change branch
 - `delete.term foo`, `move.term a b` — edits
 - `project.create`, `projects`, `branches` — project management (or `unison_status` for orientation)
 

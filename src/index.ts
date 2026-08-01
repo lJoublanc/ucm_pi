@@ -13,6 +13,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createUcm, detectCurrentProject, type Ucm } from "./ucm.ts";
 import { pruneStaleUnisonResults } from "./prune.ts";
@@ -116,16 +117,37 @@ export default function (pi: ExtensionAPI) {
       "definition — fix those and resubmit them together with your change in one " +
       "unison_update call. When editing a definition that has callers, pin its " +
       "original explicit signature (get it via unison_dump) to avoid inference " +
-      "silently narrowing it.",
+      "silently narrowing it. If the source is already in a .u scratch file on " +
+      "disk, pass scratchPath instead of code so it is not re-sent.",
     promptSnippet: "Typecheck and commit Unison definitions to the codebase in one call",
     parameters: Type.Object({
-      code: Type.String({ description: "Unison source to add/update in the codebase" }),
+      code: Type.Optional(
+        Type.String({
+          description: "Unison source to add/update in the codebase (omit when scratchPath is given)",
+        }),
+      ),
+      scratchPath: Type.Optional(
+        Type.String({
+          description:
+            "Path to a .u scratch file to commit instead of `code` — preferred when the " +
+            "source was already written to disk. Honours a leading " +
+            "`-- @unison-project: proj/branch` header (the explicit `project` param wins).",
+        }),
+      ),
       project: PROJECT_PARAM,
     }),
-    async execute(_id, params, signal) {
+    async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
+      let code = params.code;
+      let headerProject: string | undefined;
+      if (params.scratchPath !== undefined) {
+        if (code !== undefined) throw new Error("Pass either `code` or `scratchPath`, not both.");
+        code = await readFile(resolve(ctx.cwd, params.scratchPath), "utf8");
+        headerProject = code.match(/^\s*--\s*@unison-project:\s*(\S+)/m)?.[1];
+      }
+      if (code === undefined) throw new Error("Pass either `code` or `scratchPath`.");
       // Non-throwing: an incomplete update returns the affected-definition dump
       // as content the model must act on, not a bare error string.
-      return toResultKeyed(await getUcm().update(params.code, signal, params.project));
+      return toResultKeyed(await getUcm().update(code, signal, params.project ?? headerProject));
     },
   });
 

@@ -258,13 +258,31 @@ function isIncompleteUpdate(md: string): boolean {
   return INCOMPLETE_UPDATE_MARKERS.some((m) => md.includes(m));
 }
 
-function newDefinitions(md: string): string[] {
-  const defs: string[] = [];
+// UCM's `load` summary lists one definition per line, marked `+` (added) or
+// `~` (modified), with a trailing legend line "+ (added), ~ (modified)".
+// Signatures wrap across continuation lines. We keep NAMES ONLY, by design:
+// echoing full signatures back is pure token overhead (the model just
+// submitted that exact source), and the previous `name : type` regex silently
+// truncated wrapped types to their first line and missed `~` and `type` lines
+// entirely — which made committed updates look absent from the summary.
+function defSummary(md: string): { added: string[]; modified: string[] } {
+  const added: string[] = [];
+  const modified: string[] = [];
   for (const line of md.split("\n")) {
-    const m = line.match(/^\s*[+⍟]\s+(.+?)\s+:\s+(.+?)\s*$/);
-    if (m) defs.push(`${m[1]} : ${m[2]}`);
+    const m = line.match(/^\s*([+~])\s+(\S.*)$/);
+    if (!m) continue;
+    let name = m[2].trim();
+    const colon = name.indexOf(" : ");
+    if (colon !== -1) name = name.slice(0, colon).trimEnd();
+    if (!name || name.startsWith("(")) continue; // legend: "+ (added), ~ (modified)"
+    (m[1] === "~" ? modified : added).push(name);
   }
-  return defs;
+  return { added, modified };
+}
+
+/** Render a defSummary as indented `+`/`~` lines (types are kept as `type Foo`). */
+function formatDefs(s: { added: string[]; modified: string[] }): string {
+  return [...s.added.map((n) => `  + ${n}`), ...s.modified.map((n) => `  ~ ${n}`)].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -395,9 +413,11 @@ export function createUcm(config: UcmConfig) {
         const proj = target(project);
         const { ok, md } = await runTranscript({ project: proj, code, signal });
         if (!ok) return finalize(errorText(md), true, { pruneKey });
-        const defs = newDefinitions(md);
-        const summary = defs.length
-          ? `✓ Typechecks against ${proj}. ${defs.length} definition(s):\n  ${defs.join("\n  ")}`
+        const s = defSummary(md);
+        const total = s.added.length + s.modified.length;
+        const summary = total
+          ? `✓ Typechecks against ${proj}: ${s.added.length} to add, ${s.modified.length} to modify ` +
+            `(names only — nothing committed):\n${formatDefs(s)}`
           : `✓ Typechecks against ${proj} (no new/changed definitions).`;
         return finalize(summary, false, { pruneKey });
       });
@@ -450,9 +470,11 @@ export function createUcm(config: UcmConfig) {
         }
 
         if (ok) {
-          const defs = newDefinitions(md);
-          const summary = defs.length
-            ? `✓ Committed to ${proj}. ${defs.length} definition(s):\n  ${defs.join("\n  ")}`
+          const s = defSummary(md);
+          const total = s.added.length + s.modified.length;
+          const summary = total
+            ? `✓ Committed to ${proj}: ${s.added.length} added, ${s.modified.length} modified ` +
+              `(names only):\n${formatDefs(s)}`
             : ucmOutput(md) || `✓ update applied to ${proj}.`;
           return finalize(summary, false);
         }
@@ -512,15 +534,19 @@ export function createUcm(config: UcmConfig) {
     /** Codebase orientation: which codebase/project, and the available projects. */
     async status(signal?: AbortSignal): Promise<UcmResult> {
       return serialize(async () => {
-        const d = { codebase: codebase ?? "(UCM default)", project: defaultProject };
+        // NB: `defaultProject` may be a thunk — it must be RESOLVED here (via
+        // `target()`), both for display and for the transcript prompt. Passing
+        // the raw thunk used to stringify the function source into the output
+        // and produce a broken transcript (empty project list).
+        const proj = target();
         const { ok, md } = await runTranscript({
-          project: defaultProject,
+          project: proj,
           commands: ["projects"],
           signal,
         });
         const projects = ok ? ucmOutput(md) : errorText(md);
         return finalize(
-          `Codebase: ${d.codebase}\nDefault project/branch: ${d.project}\n\nProjects:\n${projects}`,
+          `Codebase: ${codebase ?? "(UCM default)"}\nDefault project/branch: ${proj}\n\nProjects:\n${projects}`,
           !ok,
         );
       });
