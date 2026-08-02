@@ -113,12 +113,13 @@ export default function (pi: ExtensionAPI) {
       "Prefer this over separate typecheck+add/update calls. If the change would " +
       "break existing dependents (a narrowed type signature, or an ability that " +
       "gained a constructor), the commit is ROLLED BACK automatically and the " +
-      "result includes UCM's canonical re-loadable source for every affected " +
-      "definition — fix those and resubmit them together with your change in one " +
-      "unison_update call. When editing a definition that has callers, pin its " +
-      "original explicit signature (get it via unison_dump) to avoid inference " +
-      "silently narrowing it. If the source is already in a .u scratch file on " +
-      "disk, pass scratchPath instead of code so it is not re-sent.",
+      "result lists every affected definition name — the authoritative " +
+      "resubmission set — plus, when UCM emits it, canonical re-loadable source. " +
+      "unison_dump the listed sources, fix, and resubmit everything together in " +
+      "one call. When editing a definition that has callers, pin its original " +
+      "explicit signature (via unison_dump) to avoid inference silently narrowing " +
+      "it. If the source is already in a .u scratch file on disk, pass " +
+      "scratchPath instead of code so it is not re-sent.",
     promptSnippet: "Typecheck and commit Unison definitions to the codebase in one call",
     parameters: Type.Object({
       code: Type.Optional(

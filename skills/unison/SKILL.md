@@ -139,6 +139,13 @@ console output. Practical consequences:
 | `unison_status` | show bound codebase, default project, available projects |
 | `unison_ucm` | escape hatch for any other UCM command |
 
+A note on workflow shape: `unison_update` is not just for the final commit —
+**trying an update is the authoritative way to discover the dependent
+closure** when you change a type or ability. Its failure mode is safe (full
+rollback) and returns the exact set of definitions that must be resubmitted
+together. Prefer one early probe update over carefully assembling dependents
+by hand.
+
 ## Targeting a project/branch
 
 The `project` argument to each tool is optional. When omitted, the default
@@ -193,22 +200,71 @@ An update can't be applied automatically when it would stop existing
    see above), breaking its callers.
 2. You added a constructor to an **ability**, making its handlers non-exhaustive.
 
-In both cases `unison_update`:
+Crucial semantics to know up front: **when anything in the dependent closure
+fails, UCM excises the ENTIRE closure into the fix-up — not just the
+definitions whose source must change.** A 5-definition change can mean a
+200-definition resubmission set. Corollaries:
 
-- **rolls the working branch back** to a clean state (it cancels the pending
-  merge and deletes the temporary `update-<branch>` branch UCM created) — so
-  **nothing is committed** and you can safely retry, and
-- returns the **full affected-definition closure** as canonical, re-loadable
-  `unison` source in the payload.
+- **Don't pre-enumerate dependents by reasoning and don't filter the set by
+  heuristics.** Trying `unison_update` and iterating on its feedback is the
+  authoritative discovery mechanism, and it is cheap (failures roll back
+  cleanly). The classic trap: assuming record accessors are auto-generated —
+  they may be **hand-written terms** pattern-matching the constructor, and
+  they fail silently off your mental list.
+- The result payload contains the **authoritative affected-name list**
+  (harvested from the staging branch before rollback) and, when UCM emits it,
+  the full closure as canonical re-loadable source. Fetch listed sources with
+  `unison_dump`, fix them, and resubmit **everything together in one call**.
 
-To finish: fix that source (restore the signature / add the missing cases) and
-call `unison_update` **once** with your change *and every affected dependent
-together*, so no reference to the old hash remains.
+In both cases `unison_update` **rolls the working branch back** to a clean
+state (cancels the pending merge, deletes the temporary `update-<branch>`
+branch) — nothing is committed, so you can safely retry.
 
 **Do not** chase the `/tmp/pi-ucm-*/code.u` path from UCM's raw message and
 **do not** `merge` a leftover `update-*` branch — that temp branch has the
 dependents *removed*, so merging it **deletes** them (this is a real data-loss
 footgun). The `update-*` branches are UCM's staging area, not something to merge.
+
+Manual fallback (raw `unison_ucm` sessions): after a failed
+`load` + `update`, the staging branch holds the change with failing dependents
+removed, so `diff.namespace /update-<branch>: /<branch>:` lists exactly the
+resubmission set. Extract names from the numbered list, then clean up with
+`cancel` + `delete.branch /update-<branch>` when done. (The dedicated tool
+does this for you and returns the names.)
+
+### Round-tripping tests with docs (`unison_dump` → `unison_update`)
+
+A doc block directly above a `test>` watch does **not** re-load: UCM prints
+
+```unison
+{{
+some doc
+}}
+test> my.tests.foo = test.verify do …
+```
+
+but feeding that back fails with a confusing
+`I found multiple bindings with the name >` — the parser cannot attach a doc
+to a watch. Emit an explicit doc binding instead (this round-trips fine):
+
+```unison
+my.tests.foo.doc : Doc
+my.tests.foo.doc =
+  {{
+some doc
+  }}
+
+test> my.tests.foo = test.verify do …
+```
+
+### Session context after `delete.branch`
+
+If you `delete.branch` the branch the session is **currently on** (e.g. a
+leftover `update-*` branch), the context dangles: subsequent queries can
+report phantom "name not found" / empty results for definitions that plainly
+exist. Always `switch` to a real branch explicitly right after, and treat
+unexpectedly empty query results as a possible targeting artifact —
+`unison_status` confirms where you are.
 
 ### Recovering a deleted definition
 

@@ -243,6 +243,18 @@ function addedByUcm(md: string): string {
   return b ? b.body.trim() : "";
 }
 
+/** Names from numbered listings like `branches` / `diff.namespace` output —
+ *  one `N. name` per line; type signatures wrap onto continuation lines that
+ *  never match the `N.` prefix, so this is names-only by construction. */
+export function parseNumberedNames(text: string): string[] {
+  const names: string[] = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*\d+\.\s+(?:(?:ability|type)\s+)?(\S+)/);
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
+
 // Phrases UCM prints when `update` can't finish automatically because existing
 // dependents would no longer typecheck. In that case UCM stages the change on a
 // temporary `update-<branch>` branch, leaves the working branch mid-merge, and
@@ -338,25 +350,53 @@ export function createUcm(config: UcmConfig) {
     }
   }
 
+  /** Branch names of any `update-<branch>` staging branches on `proj`. */
+  async function pendingUpdateBranches(proj: string, signal?: AbortSignal): Promise<string[]> {
+    const branch = proj.includes("/") ? proj.slice(proj.indexOf("/") + 1) : proj;
+    const listed = await runTranscript({ project: proj, commands: ["branches"], signal }).catch(
+      () => ({ ok: false, md: "" }) as { ok: boolean; md: string },
+    );
+    if (!listed.ok) return [];
+    const prefix = `update-${branch}`;
+    const names = new Set<string>();
+    for (const name of parseNumberedNames(ucmOutput(listed.md))) {
+      if (name === prefix || name.startsWith(prefix + "-")) names.add(name);
+    }
+    return [...names];
+  }
+
+  /** The set of definitions an incomplete `update` excised onto its staging
+   *  branch — the authoritative resubmission set. UCM excises the WHOLE
+   *  dependent closure on any propagation failure (not just the definitions
+   *  whose source must change), so `diff.namespace /update-<branch>: /<branch>:`
+   *  lists exactly what must be resubmitted together. We harvest this BEFORE
+   *  cleanupPendingUpdate deletes the staging branch — in transcript mode UCM
+   *  often does not write the fix-up file at all, making this the only way to
+   *  recover the list. */
+  async function affectedUpdateNames(proj: string, signal?: AbortSignal): Promise<string[]> {
+    const branch = proj.includes("/") ? proj.slice(proj.indexOf("/") + 1) : proj;
+    const staging = await pendingUpdateBranches(proj, signal);
+    const names = new Set<string>();
+    for (const b of staging) {
+      const diff = await runTranscript({
+        project: proj,
+        commands: [`diff.namespace /${b}: /${branch}:`],
+        signal,
+      }).catch(() => ({ ok: false, md: "" }) as { ok: boolean; md: string });
+      if (!diff.ok) continue;
+      for (const name of parseNumberedNames(ucmOutput(diff.md))) names.add(name);
+    }
+    return [...names].sort();
+  }
+
   /** Best-effort rollback of a failed `update`: abort the pending merge on the
    *  working branch and delete the temporary `update-<branch>` branch(es) UCM
    *  created, so the codebase is left clean and repeated attempts don't stack up
    *  orphaned branches. Each step is its own transcript so one failing (e.g. a
    *  branch that isn't there) never aborts the rest. */
   async function cleanupPendingUpdate(proj: string, signal?: AbortSignal): Promise<void> {
-    const branch = proj.includes("/") ? proj.slice(proj.indexOf("/") + 1) : proj;
     await runTranscript({ project: proj, commands: ["cancel"], signal }).catch(() => {});
-    const listed = await runTranscript({ project: proj, commands: ["branches"], signal }).catch(
-      () => ({ ok: false, md: "" }) as { ok: boolean; md: string },
-    );
-    if (!listed.ok) return;
-    const prefix = `update-${branch}`;
-    const names = new Set<string>();
-    for (const line of ucmOutput(listed.md).split("\n")) {
-      const m = line.match(/^\s*\d+\.\s+(\S+)/);
-      if (m && (m[1] === prefix || m[1].startsWith(prefix + "-"))) names.add(m[1]);
-    }
-    for (const name of names) {
+    for (const name of await pendingUpdateBranches(proj, signal)) {
       await runTranscript({ project: proj, commands: [`delete.branch /${name}`], signal }).catch(
         () => {},
       );
@@ -443,30 +483,56 @@ export function createUcm(config: UcmConfig) {
         });
 
         // Incomplete update (checked FIRST, regardless of `ok`): UCM couldn't
-        // apply the change automatically. Recover the closure, then undo the
+        // apply the change automatically. Recover the closure AND the affected-
+        // name list (harvested from the staging branch BEFORE rollback — in
+        // transcript mode UCM usually does not write the fix-up file, making the
+        // staging-branch diff the only recovery path), then undo the
         // half-finished merge so retries start from a clean branch.
         const dump = addedByUcm(md);
         if (isIncompleteUpdate(md) || dump) {
           const closure = rewrittenCode || dump;
+          const affected = await affectedUpdateNames(proj, signal);
           await cleanupPendingUpdate(proj, signal);
-          const text =
+          const guidance =
+            `Fix and resubmit EVERY affected definition together in one ` +
+            `unison_update call. Do not filter the list by heuristics (e.g. ` +
+            `assuming record accessors are auto-generated — they may be ` +
+            `hand-written terms); anything on it with broken source must be ` +
+            `included in the resubmission, and everything else on it rides ` +
+            `along because UCM excises the whole closure.`;
+          const parts = [
             `⚠ update incomplete on ${proj}: some existing definitions would no ` +
-            `longer typecheck after this change, so NOTHING was committed. The ` +
-            `working branch has been rolled back to a clean state (pending merge ` +
-            `cancelled, temporary \`update-*\` branch removed).\n\n` +
+              `longer typecheck after this change, so NOTHING was committed. The ` +
+              `working branch has been rolled back to a clean state (pending merge ` +
+              `cancelled, temporary \`update-*\` branch removed).`,
             `Two common causes:\n` +
-            `  • The edited definition's TYPE SIGNATURE changed — often narrowed by ` +
-            `inference (a dropped ability or parameter) — which breaks its callers. ` +
-            `Retrieve the ORIGINAL signature with unison_dump and pin it explicitly.\n` +
-            `  • You added a constructor to an ability, making its handlers ` +
-            `non-exhaustive (add the missing cases).\n\n` +
-            `Fix the source below and resubmit EVERY affected definition together in ` +
-            `one unison_update call:\n\n` +
-            (closure
-              ? "```unison\n" + closure + "\n```"
-              : `(UCM did not emit the affected-definition source; run unison_dump ` +
-                `on the broken dependents to retrieve re-loadable versions.)`);
-          return finalize(text, true);
+              `  • The edited definition's TYPE SIGNATURE changed — often narrowed by ` +
+              `inference (a dropped ability or parameter) — which breaks its callers. ` +
+              `Retrieve the ORIGINAL signature with unison_dump and pin it explicitly.\n` +
+              `  • You added a constructor to an ability, making its handlers ` +
+              `non-exhaustive (add the missing cases).`,
+          ];
+          if (affected.length > 0) {
+            parts.push(
+              `Affected definitions (${affected.length}) — the authoritative set, ` +
+                `harvested from the staging branch before rollback:\n` +
+                affected.map((n) => `  ${n}`).join("\n"),
+            );
+            parts.push(guidance);
+          }
+          if (closure) {
+            parts.push("```unison\n" + closure + "\n```");
+          } else if (affected.length === 0) {
+            parts.push(
+              `(UCM emitted neither the affected-definition source nor a staging ` +
+                `branch to harvest names from; run unison_dump on the broken ` +
+                `dependents to retrieve re-loadable versions.)`,
+            );
+            parts.push(guidance);
+          }
+          return finalize(parts.join("\n\n"), true, {
+            details: { affectedDefinitions: affected },
+          });
         }
 
         if (ok) {
