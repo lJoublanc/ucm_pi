@@ -5,15 +5,9 @@ description: Write Unison code and interact with a UCM (Unison Codebase Manager)
 
 # Unison + UCM
 
-## Never commit unless explicitly asked
+## Policy and Decisions
 
-**Only ever `add`/`update`/`unison_update` (or any other codebase-mutating
-command) when the user explicitly asks you to persist the change.** By default,
-assume your job is to *prepare* changes in a scratch file (`*.u`) and get them
-to typecheck — nothing more. Do not commit "to be helpful," to run a test, or to
-tidy up: the codebase is the user's, and commits change its content-addressed
-history. If a task seems to require committing (e.g. to run `unison_test`), and
-the user hasn't asked for it, say so and ask first.
+Refer to `POLICY.md` for codebase commit policies. If you are unsure whether to prepare changes in a scratch file or commit them to the codebase, **ask what to do if not explicitly told**.
 
 ## The one rule that trips up file-based agents
 
@@ -27,14 +21,12 @@ Only *scratch* files (`*.u`) are real files you edit.
 1. Write/modify definitions in a scratch file (e.g. `scratch.u`) with `write`/`edit`.
    Editing a `.u` file auto-runs a typecheck — read the appended diagnostics.
 2. Fix until it typechecks. For inline snippets, call `unison_typecheck`.
-3. Stop there by default. **Commit with `unison_update` only when the user
-   explicitly asks** for the change to land in the codebase; it typechecks
-   **and** adds/updates in one step. If the source is already in a scratch
-   file, pass `scratchPath` instead of `code` — re-sending the file contents
-   inline wastes tokens.
-4. **To learn whether tests pass** you must commit and run `unison_test` —
-   typechecking alone never reports pass/fail (see [Testing](#testing)). Since
-   this requires a commit, get the user's go-ahead first.
+3. Use `unison_update` to typecheck and commit definitions to the codebase in one step.
+   If the source is already in a scratch file, pass `scratchPath` instead of `code`
+   — re-sending the file contents inline wastes tokens.
+4. **To learn whether tests pass** you must run `unison_test` on committed definitions —
+   typechecking alone never reports pass/fail (see [Testing](#testing)). If unsure
+   whether to commit changes or run tests, ask what to do if not explicitly told.
 
 Do not call `unison_typecheck` and then `unison_update` separately for the same
 code — `unison_update` already typechecks. Fewer calls = fewer tokens.
@@ -131,7 +123,7 @@ console output. Practical consequences:
 | Tool | Use for |
 |------|---------|
 | `unison_typecheck` | check source without committing |
-| `unison_update` | typecheck + commit in one call (only if the user wants to persist) |
+| `unison_update` | typecheck + commit in one call |
 | `unison_view` | read (pretty-printed) source of existing definitions |
 | `unison_dump` | read **re-loadable** source of existing definitions (for editing) |
 | `unison_find` | search by name, or `: <type>` for type-directed search |
