@@ -93,15 +93,34 @@ export default function (pi: ExtensionAPI) {
       "Run this after writing/editing definitions and before claiming code works.",
     promptSnippet: "Typecheck Unison source and get only the compiler diagnostics",
     parameters: Type.Object({
-      code: Type.String({ description: "Unison source to typecheck" }),
+      code: Type.Optional(
+        Type.String({
+          description: "Unison source to typecheck (omit when scratchPath is given)",
+        }),
+      ),
       scratchPath: Type.Optional(
-        Type.String({ description: "Scratch file this code belongs to (for de-duplication)" }),
+        Type.String({
+          description:
+            "Path to a .u scratch file to typecheck instead of `code` — preferred when " +
+            "the source was already written to disk. Honours a leading " +
+            "`-- @unison-project: proj/branch` header (the explicit `project` param wins).",
+        }),
       ),
       project: PROJECT_PARAM,
     }),
     async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
+      let code = params.code;
+      let headerProject: string | undefined;
+      if (params.scratchPath !== undefined) {
+        if (code !== undefined) throw new Error("Pass either `code` or `scratchPath`, not both.");
+        code = await readFile(resolve(ctx.cwd, params.scratchPath), "utf8");
+        headerProject = code.match(/^\s*--\s*@unison-project:\s*(\S+)/m)?.[1];
+      }
+      if (code === undefined) throw new Error("Pass either `code` or `scratchPath`.");
       const key = `typecheck:${params.scratchPath ? resolve(ctx.cwd, params.scratchPath) : "inline"}`;
-      return toResultKeyed(await getUcm().typecheck(params.code, key, signal, params.project));
+      return toResultKeyed(
+        await getUcm().typecheck(code, key, signal, params.project ?? headerProject),
+      );
     },
   });
 
