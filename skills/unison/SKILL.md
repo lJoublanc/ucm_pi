@@ -13,7 +13,7 @@ Refer to `POLICY.md` for codebase commit policies. If you are unsure whether to 
 
 **Definitions live in the content-addressed codebase, not in files.** `grep`,
 `read`, and `find` (the built-in ones) cannot see them. To inspect existing
-code use `unison_view` (source) and `unison_find` (search by name or type).
+code use `unison_view` (source) and `unison_find` (search by name or type) or `unison_sfind`.
 Only *scratch* files (`*.u`) are real files you edit.
 
 ## Workflow
@@ -126,8 +126,8 @@ console output. Practical consequences:
 | `unison_update` | typecheck + commit in one call |
 | `unison_view` | read (pretty-printed) source of existing definitions |
 | `unison_dump` | read **re-loadable** source of existing definitions (for editing) |
-| `unison_find` | search by name, or `: <type>` for type-directed search |
 | `unison_sfind` | search codebase AST for structural pattern matches (`@rewrite` rules) |
+| `unison_find` | search by name, or `: <type>` for type-directed search |
 | `unison_test` | run the **committed** test suite — the only tool that reports pass/fail |
 | `unison_status` | show bound codebase, default project, available projects |
 | `unison_ucm` | escape hatch for any other UCM command |
@@ -143,10 +143,27 @@ Choose the right search tool to minimize token usage and latency:
   - **When to use:** You need to find actual code call sites or expression structures across the codebase (e.g. *"find every place calling `unsupportedMixedPrecision` with 3 arguments"* or *"find all uses of `(=!=)` instead of `(!==)`"*).
   - **Writing rules:** Provide a `@rewrite` pattern rule directly:
     ```unison
-    findMixed a b c = @rewrite term (unsupportedMixedPrecision a b c) ==> ()
+    findMixed a b c = @rewrite term (unsupportedMixedPrecision#abc1234 a b c) ==> ()
     ```
   - **Pinning with `name#hash`:** When refactoring a definition whose name or signature is changing, pin the term with `#hash` or `name#hash` (e.g. `foo#abc1234 a b`) so the matcher cryptographically identifies the old version across the codebase.
   - **Token profile:** Evaluates AST matchers and returns matching definition names. Keep rules concise (minimal variables, dummy `==> ()` RHS). Results are automatically deduplicated and pruned across turns.
+
+#### Recipe: Changing Function Signatures / Arity with `@rewrite`
+
+When refactoring a function whose signature, parameter count, or type is changing across the codebase:
+
+1. **Find the old hash**: Run `unison_find myFn` (e.g. `#a1b2c3d`).
+2. **Write the new definition** in your scratch file with the updated signature.
+3. **Write a `@rewrite` rule pinning the old hash on the LHS**:
+   ```unison
+   migrateRule a b c = @rewrite term (myFn#a1b2c3d a b c) ==> myFn a c
+   ```
+   *Why this works:* The LHS typechecks against the old 3-arg term in the codebase, while the RHS typechecks against the new 2-arg term in the scratch file.
+4. **Find or rewrite call sites**:
+   - Run `unison_sfind` with the rule to locate all call sites across the codebase.
+   - Or run `rewrite migrateRule` via `unison_ucm` to automatically update all matching call sites in the scratch file.
+
+> ⚠️ **Anti-pattern**: Never fall back to regex / sed / text substitution when refactoring Unison term signatures. In a content-addressed codebase, pinning with `name#hash` in a `@rewrite` rule provides guaranteed type-safe, AST-aware refactoring.
 
 A note on workflow shape: `unison_update` is not just for the final commit —
 **trying an update is the authoritative way to discover the dependent
