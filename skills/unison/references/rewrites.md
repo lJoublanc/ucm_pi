@@ -197,3 +197,45 @@ findEitherFailure = @rewrite signature a . Either Failure a ==> ()
 > sfind findEitherFailure
 > find 1-5
 ```
+
+## Pattern Variables vs. Concrete Terms in Rewrite Rules
+
+When writing `@rewrite` rules for `sfind` or `rewrite`:
+
+### 1. Function Arguments are Pattern Variables (Wildcards)
+Any identifier in the parameter list of the rewrite rule function (e.g. `rule a b = ...`) is treated as a **pattern variable**. Pattern variables match **any** term or sub-expression at that position.
+
+- **Pitfall: Bare pattern variable `term x` matches everything**
+  ```unison
+  -- ⚠️ BAD: 'x' is an unconstrained pattern variable.
+  -- This matches EVERY term and sub-expression in the entire codebase!
+  matchEverything x = @rewrite term x ==> ()
+  ```
+
+- **Pitfall: Putting the target function in the parameter list**
+  ```unison
+  -- ⚠️ BAD: 'myFn' is declared as a parameter, making it a wildcard.
+  -- This matches ANY function applied to an argument (f x), not just myFn!
+  matchAnyCall myFn x = @rewrite term (myFn x) ==> ()
+  ```
+
+### 2. Matching Concrete Functions and Calls
+To match calls to a specific function or constructor, **omit** that function name from the parameter list so it resolves to the concrete definition in scope:
+
+```unison
+-- ✅ GOOD: 'math.diag' resolves to the concrete function.
+-- 'x' is the pattern variable binding the argument.
+findDiag x = @rewrite term (math.diag x) ==> ()
+
+-- ✅ GOOD: Multi-argument function call matching
+findMixed a b c = @rewrite term (unsupportedMixedPrecision#abc1234 a b c) ==> ()
+```
+
+### 3. Replacing Terms / Aliases Without Arguments
+When replacing one identifier or alias with another directly (not matching an applied function call), write a rule with **zero parameters**:
+
+```unison
+-- ✅ GOOD: Replaces all occurrences of oldAlias with newAlias
+aliasRule = @rewrite term oldAlias ==> newAlias
+```
+

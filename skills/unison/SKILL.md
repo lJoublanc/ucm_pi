@@ -147,8 +147,13 @@ Choose the right search tool to minimize token usage and latency:
     ```unison
     findMixed a b c = @rewrite term (unsupportedMixedPrecision#abc1234 a b c) ==> ()
     ```
+  - **Pattern variables vs. concrete identifiers:**
+    - Arguments to the rule function (e.g. `rule a b = ...`) are treated as **pattern variables** (wildcards matching any expression).
+    - **Bare pattern variables match everything:** A rule like `rule x = @rewrite term x ==> ()` matches *every single term and sub-expression across the codebase*.
+    - **Keep concrete functions out of the parameter list:** To match calls to `myFunc`, do **not** declare `myFunc` as a rule argument (`rule myFunc x = ...` ❌ treats `myFunc` as a wildcard matching any function!). Instead write `rule x = @rewrite term (myFunc x) ==> ...` ✅ where `myFunc` is resolved as the concrete codebase definition and `x` binds the argument.
+    - **Zero-arg rules for direct term/alias replacement:** If simply replacing one term/identifier with another, pass zero rule arguments: `rule = @rewrite term oldFn ==> newFn`.
   - **Pinning with `name#hash`:** When refactoring a definition whose name or signature is changing, pin the term with `#hash` or `name#hash` (e.g. `foo#abc1234 a b`) so the matcher cryptographically identifies the old version across the codebase.
-  - **Reference Guide:** See `references/rewrites.md` in this skill for the full reference on multi-clause `@rewrite` blocks (`term`, `case`, `signature`), capture avoidance, and `rewrite` (sfind.replace) examples.
+  - **Reference Guide:** See `references/rewrites.md` in this skill for the full reference on multi-clause `@rewrite` blocks (`term`, `case`, `signature`), capture avoidance, pattern variables, and `rewrite` (sfind.replace) examples.
   - **Token profile:** Results are automatically deduplicated and pruned across turns.
 
 #### Recipe: Refactoring Code & Changing Signatures with `@rewrite`
