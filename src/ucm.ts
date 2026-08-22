@@ -568,11 +568,12 @@ export function createUcm(config: UcmConfig) {
       });
     },
 
-    /** Structured AST search (sfind / rewrite.find) using a @rewrite rule. */
+    /** Structured AST search (sfind / rewrite.find) or search-and-replace using a @rewrite rule. */
     async sfind(
       code: string,
       ruleName: string,
       pruneKey: string,
+      rewrite?: boolean,
       signal?: AbortSignal,
       project?: string,
     ): Promise<UcmResult> {
@@ -591,6 +592,93 @@ export function createUcm(config: UcmConfig) {
           }
           return finalize(err, true, { pruneKey });
         }
+        if (md.includes("I couldn't find any matches")) {
+          return finalize("No matches found for rewrite rule.", false, { pruneKey });
+        }
+        const names = parseNumberedNames(ucmOutput(md));
+        if (names.length === 0) {
+          return finalize("No matches found for rewrite rule.", false, { pruneKey });
+        }
+
+        if (rewrite) {
+          const count = names.length;
+          const rewriteTranscript = await runTranscript({
+            project: proj,
+            code,
+            commands: [
+              `sfind ${ruleName}`,
+              `edit 1-${count}`,
+              `rewrite ${ruleName}`,
+              `load`,
+              `update`,
+              `delete.term ${ruleName}`,
+            ],
+            captureRewrite: true,
+            signal,
+          });
+
+          const dump = addedByUcm(rewriteTranscript.md);
+          if (isIncompleteUpdate(rewriteTranscript.md) || dump) {
+            const closure = rewriteTranscript.rewrittenCode || dump;
+            const affected = await affectedUpdateNames(proj, signal);
+            await cleanupPendingUpdate(proj, signal);
+            const guidance =
+              `Fix and resubmit EVERY affected definition together in one ` +
+              `unison_update call. Do not filter the list by heuristics (e.g. ` +
+              `assuming record accessors are auto-generated — they may be ` +
+              `hand-written terms); anything on it with broken source must be ` +
+              `included in the resubmission, and everything else on it rides ` +
+              `along because UCM excises the whole closure.`;
+            const parts = [
+              `⚠ update incomplete on ${proj}: some existing definitions would no ` +
+                `longer typecheck after this rewrite, so NOTHING was committed. The ` +
+                `working branch has been rolled back to a clean state (pending merge ` +
+                `cancelled, temporary \`update-*\` branch removed).`,
+              `Two common causes:\n` +
+                `  • The edited definition's TYPE SIGNATURE changed — often narrowed by ` +
+                `inference (a dropped ability or parameter) — which breaks its callers. ` +
+                `Retrieve the ORIGINAL signature with unison_dump and pin it explicitly.\n` +
+                `  • You added a constructor to an ability, making its handlers ` +
+                `non-exhaustive (add the missing cases).`,
+            ];
+            if (affected.length > 0) {
+              parts.push(
+                `Affected definitions (${affected.length}) — the authoritative set, ` +
+                  `harvested from the staging branch before rollback:\n` +
+                  affected.map((n) => `  ${n}`).join("\n"),
+              );
+              parts.push(guidance);
+            }
+            if (closure) {
+              parts.push("```unison\n" + closure + "\n```");
+            } else if (affected.length === 0) {
+              parts.push(
+                `(UCM emitted neither the affected-definition source nor a staging ` +
+                  `branch to harvest names from; run unison_dump on the broken ` +
+                  `dependents to retrieve re-loadable versions.)`,
+              );
+              parts.push(guidance);
+            }
+            return finalize(parts.join("\n\n"), true, {
+              details: { affectedDefinitions: affected },
+            });
+          }
+
+          if (rewriteTranscript.ok) {
+            const s = defSummary(rewriteTranscript.md);
+            s.added = s.added.filter((n) => n !== ruleName);
+            s.modified = s.modified.filter((n) => n !== ruleName);
+            const total = s.added.length + s.modified.length;
+            const summary = total
+              ? `✓ Rewrote and committed to ${proj}: ${s.modified.length} modified, ${s.added.length} added definitions (names only):\n${formatDefs(s)}`
+              : ucmOutput(rewriteTranscript.md) || `✓ rewrite applied to ${proj}.`;
+            return finalize(summary, false, {
+              details: { modifiedDefinitions: s.modified, addedDefinitions: s.added },
+            });
+          }
+          return finalize(errorText(rewriteTranscript.md), true);
+        }
+
         const ucmBlocks = parseBlocks(md).filter((b) => b.info.startsWith("ucm"));
         if (ucmBlocks.length > 1) {
           const commandBlocks = ucmBlocks.slice(1);

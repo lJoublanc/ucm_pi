@@ -242,16 +242,16 @@ export default function (pi: ExtensionAPI) {
     name: "unison_sfind",
     label: "Unison Structured Find",
     description:
-      "Search the codebase AST using a structural pattern / @rewrite rule (e.g. `r a b = @rewrite term (foo a b) ==> ()`). " +
+      "Search or search-and-replace the codebase AST using a structural pattern / @rewrite rule (e.g. `r a b = @rewrite term (foo a b) ==> ()`). " +
       "Unlike unison_find (which does fuzzy name and type signature search), unison_sfind searches the actual syntax tree " +
       "of terms across the codebase for matching AST expressions. Use name#hash notation (e.g. `foo#abc1234`) on terms " +
-      "for precise cryptographic matching even during renames or signature changes.",
-    promptSnippet: "Search the codebase AST for structural pattern matches using a @rewrite rule",
+      "for precise cryptographic matching even during renames or signature changes. Set `rewrite: true` to execute the AST rewrite across all matching definitions and commit in one step.",
+    promptSnippet: "Search or search-and-replace the codebase AST using a @rewrite rule",
     parameters: Type.Object({
       pattern: Type.Optional(
         Type.String({
           description:
-            "Unison @rewrite rule or pattern expression to search for, e.g. " +
+            "Unison @rewrite rule or pattern expression to search/rewrite, e.g. " +
             "`r a b = @rewrite term (foo a b) ==> ()` or `r x = @rewrite term (x + 1) ==> ()`.",
         }),
       ),
@@ -266,6 +266,12 @@ export default function (pi: ExtensionAPI) {
         Type.String({
           description:
             "Name of the rewrite rule function (e.g. `r`). If omitted, it is inferred from the pattern / scratch file.",
+        }),
+      ),
+      rewrite: Type.Optional(
+        Type.Boolean({
+          description:
+            "When true, performs search-and-replace: stages all matching codebase definitions, executes the rewrite, reloads, and commits in one step. Defaults to false (search-only).",
         }),
       ),
       project: PROJECT_PARAM,
@@ -297,9 +303,16 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const key = `sfind:${params.project ?? headerProject ?? ""}:${ruleName}`;
+      const key = `sfind:${params.project ?? headerProject ?? ""}:${ruleName}:${params.rewrite ? "rw" : "ro"}`;
       return toResultKeyed(
-        await getUcm().sfind(codeToSend, ruleName, key, signal, params.project ?? headerProject),
+        await getUcm().sfind(
+          codeToSend,
+          ruleName,
+          key,
+          params.rewrite ?? false,
+          signal,
+          params.project ?? headerProject,
+        ),
       );
     },
   });

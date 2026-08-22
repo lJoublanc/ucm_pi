@@ -40,6 +40,8 @@ Let's rewrite these:
 > rewrite eitherToOptional
 ```
 
+> **Note on reloading scratch files**: `rewrite` updates the definitions in the scratch file on disk. If automatic file watches are disabled (or running inside scripts/transcripts), UCM will not detect the modified file automatically. You must run `load` before `add` or `update`:
+
 ``` ucm :hide
 > load
 > add
