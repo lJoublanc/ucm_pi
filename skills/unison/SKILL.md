@@ -141,11 +141,12 @@ Choose the right search tool to minimize token usage and latency:
   - **Token profile:** Very cheap, instantaneous index lookup.
 - **`unison_sfind` (AST / Syntax-Tree Pattern Matching):**
   - **When to use:** You need to find actual code call sites or expression structures across the codebase (e.g. *"find every place calling `unsupportedMixedPrecision` with 3 arguments"* or *"find all uses of `(=!=)` instead of `(!==)`"*).
-  - **Writing rules:** Provide a `@rewrite` pattern rule directly:
+  - **Writing rules:** Provide a `@rewrite` pattern rule directly (`term`, `case`, or `signature`):
     ```unison
     findMixed a b c = @rewrite term (unsupportedMixedPrecision#abc1234 a b c) ==> ()
     ```
   - **Pinning with `name#hash`:** When refactoring a definition whose name or signature is changing, pin the term with `#hash` or `name#hash` (e.g. `foo#abc1234 a b`) so the matcher cryptographically identifies the old version across the codebase.
+  - **Reference Guide:** See `references/rewrites.md` in this skill for the full reference on multi-clause `@rewrite` blocks (`term`, `case`, `signature`), capture avoidance, and `rewrite` (sfind.replace) examples.
   - **Token profile:** Evaluates AST matchers and returns matching definition names. Keep rules concise (minimal variables, dummy `==> ()` RHS). Results are automatically deduplicated and pruned across turns.
 
 #### Recipe: Changing Function Signatures / Arity with `@rewrite`
