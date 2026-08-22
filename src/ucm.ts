@@ -330,7 +330,7 @@ export function createUcm(config: UcmConfig) {
         prompts.push(`${opts.project}> load ${codePath}`);
       }
       for (const c of opts.commands ?? []) prompts.push(`${opts.project}> ${c}`);
-      const transcript = "```ucm\n" + prompts.join("\n") + "\n```\n";
+      const transcript = prompts.map((p) => "```ucm\n" + p + "\n```").join("\n\n") + "\n";
       await writeFile(src, transcript, "utf8");
       const args = [...(codebase ? ["-c", codebase] : []), "transcript.in-place", src];
       await exec("ucm", args, { signal: opts.signal, timeout: timeoutMs });
@@ -584,7 +584,29 @@ export function createUcm(config: UcmConfig) {
           commands: [`sfind ${ruleName}`],
           signal,
         });
-        if (!ok) return finalize(errorText(md), true, { pruneKey });
+        if (!ok) {
+          const err = errorText(md);
+          if (err.includes("I couldn't find any matches")) {
+            return finalize(err, false, { pruneKey });
+          }
+          return finalize(err, true, { pruneKey });
+        }
+        const ucmBlocks = parseBlocks(md).filter((b) => b.info.startsWith("ucm"));
+        if (ucmBlocks.length > 1) {
+          const commandBlocks = ucmBlocks.slice(1);
+          const stripped = commandBlocks
+            .map((b) =>
+              b.body
+                .split("\n")
+                .filter((l) => !/^\s*\S+\/\S+>\s/.test(l))
+                .join("\n")
+                .trim(),
+            )
+            .filter(Boolean)
+            .join("\n\n")
+            .trim();
+          if (stripped) return finalize(stripped, false, { pruneKey });
+        }
         return finalize(ucmOutput(md) || "(no matches found)", false, { pruneKey });
       });
     },
