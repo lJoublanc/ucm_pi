@@ -1,8 +1,13 @@
 {
-  "name": "unison-pi-tool",
+  "name": "ucm_pi",
   "version": "0.1.0",
   "description": "Token-efficient Unison / UCM support for the pi coding agent (no MCP).",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lJoublanc/ucm_pi.git"
+  },
+  "keywords": ["pi-package", "unison", "ucm"],
   "pi": {
     "extensions": ["./src/index.ts"],
     "skills": ["./skills"]

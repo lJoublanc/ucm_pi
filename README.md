@@ -1,4 +1,4 @@
-# unison-pi-tool
+# ucm_pi
 
 Token-efficient Unison / UCM support for the [pi](https://github.com/earendil-works/pi-mono)
 coding agent — **without MCP**.
@@ -39,10 +39,10 @@ pi extension + skill and is built around six token-reduction strategies.
 ## Install
 
 ```bash
-pi install git:github.com/you/unison-pi-tool
+pi install git:github.com/you/ucm_pi
 # or point settings.json at a local checkout:
-#   { "extensions": ["/path/to/unison-pi-tool/src/index.ts"],
-#     "skills":     ["/path/to/unison-pi-tool/skills"] }
+#   { "extensions": ["/path/to/ucm_pi/src/index.ts"],
+#     "skills":     ["/path/to/ucm_pi/skills"] }
 ```
 
 Requires the `ucm` binary (Unison 1.3+) on `PATH`.
