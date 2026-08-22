@@ -568,6 +568,27 @@ export function createUcm(config: UcmConfig) {
       });
     },
 
+    /** Structured AST search (sfind / rewrite.find) using a @rewrite rule. */
+    async sfind(
+      code: string,
+      ruleName: string,
+      pruneKey: string,
+      signal?: AbortSignal,
+      project?: string,
+    ): Promise<UcmResult> {
+      return serialize(async () => {
+        const proj = target(project);
+        const { ok, md } = await runTranscript({
+          project: proj,
+          code,
+          commands: [`sfind ${ruleName}`],
+          signal,
+        });
+        if (!ok) return finalize(errorText(md), true, { pruneKey });
+        return finalize(ucmOutput(md) || "(no matches found)", false, { pruneKey });
+      });
+    },
+
     /** Read-only codebase query (view / find / docs / ls / dependencies …). */
     async query(
       command: string,

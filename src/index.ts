@@ -239,6 +239,72 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "unison_sfind",
+    label: "Unison Structured Find",
+    description:
+      "Search the codebase AST using a structural pattern / @rewrite rule (e.g. `r a b = @rewrite term (foo a b) ==> ()`). " +
+      "Unlike unison_find (which does fuzzy name and type signature search), unison_sfind searches the actual syntax tree " +
+      "of terms across the codebase for matching AST expressions. Use name#hash notation (e.g. `foo#abc1234`) on terms " +
+      "for precise cryptographic matching even during renames or signature changes.",
+    promptSnippet: "Search the codebase AST for structural pattern matches using a @rewrite rule",
+    parameters: Type.Object({
+      pattern: Type.Optional(
+        Type.String({
+          description:
+            "Unison @rewrite rule or pattern expression to search for, e.g. " +
+            "`r a b = @rewrite term (foo a b) ==> ()` or `r x = @rewrite term (x + 1) ==> ()`.",
+        }),
+      ),
+      scratchPath: Type.Optional(
+        Type.String({
+          description:
+            "Path to a .u scratch file containing the @rewrite rule instead of passing `pattern` inline. " +
+            "Honours a leading `-- @unison-project: proj/branch` header.",
+        }),
+      ),
+      rule: Type.Optional(
+        Type.String({
+          description:
+            "Name of the rewrite rule function (e.g. `r`). If omitted, it is inferred from the pattern / scratch file.",
+        }),
+      ),
+      project: PROJECT_PARAM,
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
+      let code = params.pattern;
+      let headerProject: string | undefined;
+      if (params.scratchPath !== undefined) {
+        if (code !== undefined) throw new Error("Pass either `pattern` or `scratchPath`, not both.");
+        code = await readFile(resolve(ctx.cwd, params.scratchPath), "utf8");
+        headerProject = code.match(/^\s*--\s*@unison-project:\s*(\S+)/m)?.[1];
+      }
+      if (code === undefined) throw new Error("Pass either `pattern` or `scratchPath`.");
+
+      let ruleName = params.rule?.trim();
+      let codeToSend = code;
+      if (!ruleName) {
+        const m = code.match(/^\s*([A-Za-z0-9_'.!$%&*+/<=>?@^|-~]+)\s*[^=]*=\s*@rewrite/m);
+        if (m) {
+          ruleName = m[1];
+        } else if (code.includes("@rewrite")) {
+          ruleName = "__sfind_rule";
+          codeToSend = `${ruleName} = ${code}`;
+        } else {
+          throw new Error(
+            "Could not determine the @rewrite rule name. Provide a complete rule definition, " +
+              "e.g. `myRule a b = @rewrite term (foo a b) ==> ()`, or specify the `rule` parameter.",
+          );
+        }
+      }
+
+      const key = `sfind:${params.project ?? headerProject ?? ""}:${ruleName}`;
+      return toResultKeyed(
+        await getUcm().sfind(codeToSend, ruleName, key, signal, params.project ?? headerProject),
+      );
+    },
+  });
+
+  pi.registerTool({
     name: "unison_test",
     label: "Unison Test",
     description: "Run the project's test suite and return the results.",

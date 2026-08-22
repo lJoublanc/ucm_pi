@@ -76,6 +76,7 @@ see what's actually bound.
 - `unison_dump` — read **re-loadable** source (via `edit.new`) for editing +
   committing back; use this instead of `unison_view` when you'll modify a def
 - `unison_find` — search by name or `: <type>`
+- `unison_sfind` — search codebase AST using a `@rewrite` pattern rule (structured search)
 - `unison_test` — run the test suite
 - `unison_status` — show the bound codebase, default project, and projects list
 - `unison_ucm` — escape hatch for any other UCM command
