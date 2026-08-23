@@ -242,36 +242,44 @@ export default function (pi: ExtensionAPI) {
     name: "unison_sfind",
     label: "Unison Structured Find",
     description:
-      "Search or search-and-replace the codebase AST using a structural pattern / @rewrite rule (e.g. `r a b = @rewrite term (foo a b) ==> ()`). " +
+      "Search or search-and-replace the codebase or a scratch file AST using a structural pattern / @rewrite rule " +
+      "(e.g. `r a b = @rewrite term (foo a b) ==> ()` or `r x = @rewrite term (x + 1) ==> (Nat.increment x)`). " +
       "Unlike unison_find (which does fuzzy name and type signature search), unison_sfind searches the actual syntax tree " +
-      "of terms across the codebase for matching AST expressions. Use name#hash notation (e.g. `foo#abc1234`) on terms " +
-      "for precise cryptographic matching even during renames or signature changes. Set `rewrite: true` to execute the AST rewrite across all matching definitions and commit in one step.",
-    promptSnippet: "Search or search-and-replace the codebase AST using a @rewrite rule",
+      "for matching AST expressions. Use name#hash notation (e.g. `foo#abc1234`) on terms for precise cryptographic matching " +
+      "even during renames or signature changes. Set `rewrite: true` to execute AST search-and-replace (rewrites the file in place " +
+      "when `scratchPath` is given, or stages and commits across the codebase when `scratchPath` is omitted).",
+    promptSnippet: "Search or search-and-replace codebase or scratch-file AST using a @rewrite rule",
     parameters: Type.Object({
       pattern: Type.Optional(
         Type.String({
           description:
             "Unison @rewrite rule or pattern expression to search/rewrite, e.g. " +
-            "`r a b = @rewrite term (foo a b) ==> ()` or `r x = @rewrite term (x + 1) ==> ()`.",
+            "`r a b = @rewrite term (foo a b) ==> ()` or `r x = @rewrite term (x + 1) ==> (Nat.increment x)`.",
         }),
       ),
       scratchPath: Type.Optional(
         Type.String({
           description:
-            "Path to a .u scratch file containing the @rewrite rule instead of passing `pattern` inline. " +
-            "Honours a leading `-- @unison-project: proj/branch` header.",
+            "Path to a .u scratch file on disk to search or rewrite in place. When omitted, operates on the codebase.",
         }),
       ),
       rule: Type.Optional(
         Type.String({
           description:
-            "Name of the rewrite rule function (e.g. `r`). If omitted, it is inferred from the pattern / scratch file.",
+            "Name of the rewrite rule function (e.g. `r`). If omitted, it is inferred from the pattern or scratch file.",
         }),
       ),
       rewrite: Type.Optional(
         Type.Boolean({
           description:
-            "When true, performs search-and-replace: stages all matching codebase definitions, executes the rewrite, reloads, and commits in one step. Defaults to false (search-only).",
+            "When true, performs search-and-replace. If `scratchPath` is given, modifies the file on disk in place; " +
+            "if omitted, stages all matching codebase definitions, rewrites, and commits. Defaults to false (search-only).",
+        }),
+      ),
+      commit: Type.Optional(
+        Type.Boolean({
+          description:
+            "When true with `scratchPath` and `rewrite: true`, also commits the rewritten definitions to the codebase. Defaults to false.",
         }),
       ),
       project: PROJECT_PARAM,
@@ -279,39 +287,85 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
       let code = params.pattern;
       let headerProject: string | undefined;
-      if (params.scratchPath !== undefined) {
-        if (code !== undefined) throw new Error("Pass either `pattern` or `scratchPath`, not both.");
-        code = await readFile(resolve(ctx.cwd, params.scratchPath), "utf8");
-        headerProject = code.match(/^\s*--\s*@unison-project:\s*(\S+)/m)?.[1];
+      const scratchPath = params.scratchPath ? resolve(ctx.cwd, params.scratchPath) : undefined;
+      let scratchCode: string | undefined;
+
+      if (scratchPath) {
+        scratchCode = await readFile(scratchPath, "utf8");
+        headerProject = scratchCode.match(/^\s*--\s*@unison-project:\s*(\S+)/m)?.[1];
       }
-      if (code === undefined) throw new Error("Pass either `pattern` or `scratchPath`.");
 
       let ruleName = params.rule?.trim();
-      let codeToSend = code;
-      if (!ruleName) {
-        const m = code.match(/^\s*([A-Za-z0-9_'.!$%&*+/<=>?@^|-~]+)\s*[^=]*=\s*@rewrite/m);
-        if (m) {
-          ruleName = m[1];
-        } else if (code.includes("@rewrite")) {
-          ruleName = "__sfind_rule";
-          codeToSend = `${ruleName} = ${code}`;
-        } else {
-          throw new Error(
-            "Could not determine the @rewrite rule name. Provide a complete rule definition, " +
-              "e.g. `myRule a b = @rewrite term (foo a b) ==> ()`, or specify the `rule` parameter.",
-          );
+      let ruleCode = code;
+      let tempRuleAdded = false;
+
+      if (code) {
+        if (!ruleName) {
+          const m = code.match(/^[ \t]*([A-Za-z0-9_'.!$%&*+/<=>?@^|-~]+)[^\n=]*=\s*@rewrite/m);
+          if (m) {
+            ruleName = m[1];
+          } else if (code.includes("@rewrite")) {
+            ruleName = "__sfind_rule";
+            ruleCode = `${ruleName} = ${code}`;
+          } else {
+            throw new Error(
+              "Could not determine the @rewrite rule name. Provide a complete rule definition, " +
+                "e.g. `myRule a b = @rewrite term (foo a b) ==> ()`, or specify the `rule` parameter.",
+            );
+          }
         }
+        const isDefinedInFile = scratchCode
+          ? new RegExp(`^[ \\t]*${ruleName.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\b`, "m").test(scratchCode)
+          : false;
+        tempRuleAdded = scratchCode !== undefined && !isDefinedInFile;
+      } else if (scratchCode) {
+        if (!ruleName) {
+          const m = scratchCode.match(/^[ \t]*([A-Za-z0-9_'.!$%&*+/<=>?@^|-~]+)[^\n=]*=\s*@rewrite/m);
+          if (m) {
+            ruleName = m[1];
+          } else {
+            throw new Error(
+              "No @rewrite rule found in " +
+                params.scratchPath +
+                ". Provide an inline @rewrite rule via `pattern`, or define one inside the scratch file.",
+            );
+          }
+        }
+      } else {
+        throw new Error("Pass either `pattern` (inline rule) or `scratchPath` (file on disk).");
       }
 
-      const key = `sfind:${params.project ?? headerProject ?? ""}:${ruleName}:${params.rewrite ? "rw" : "ro"}`;
+      const targetProject = params.project ?? headerProject;
+      const rewriteMode = params.rewrite ?? false;
+      const commitMode = params.commit ?? false;
+
+      if (scratchPath && scratchCode !== undefined) {
+        const key = `sfind:scratch:${params.scratchPath}:${ruleName}:${rewriteMode ? "rw" : "ro"}`;
+        return toResultKeyed(
+          await getUcm().sfindScratch(
+            scratchCode,
+            ruleCode,
+            ruleName,
+            key,
+            rewriteMode,
+            commitMode,
+            tempRuleAdded,
+            scratchPath,
+            signal,
+            targetProject,
+          ),
+        );
+      }
+
+      const key = `sfind:codebase:${targetProject ?? ""}:${ruleName}:${rewriteMode ? "rw" : "ro"}`;
       return toResultKeyed(
         await getUcm().sfind(
-          codeToSend,
+          ruleCode!,
           ruleName,
           key,
-          params.rewrite ?? false,
+          rewriteMode,
           signal,
-          params.project ?? headerProject,
+          targetProject,
         ),
       );
     },

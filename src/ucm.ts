@@ -568,7 +568,7 @@ export function createUcm(config: UcmConfig) {
       });
     },
 
-    /** Structured AST search (sfind / rewrite.find) or search-and-replace using a @rewrite rule. */
+    /** Structured AST search (sfind / rewrite.find) or search-and-replace across the codebase using a @rewrite rule. */
     async sfind(
       code: string,
       ruleName: string,
@@ -696,6 +696,141 @@ export function createUcm(config: UcmConfig) {
           if (stripped) return finalize(stripped, false, { pruneKey });
         }
         return finalize(ucmOutput(md) || "(no matches found)", false, { pruneKey });
+      });
+    },
+
+    /** Search or search-and-replace AST inside a scratch file (.u on disk). */
+    async sfindScratch(
+      scratchCode: string,
+      ruleCode: string | undefined,
+      ruleName: string,
+      pruneKey: string,
+      rewrite: boolean,
+      commit: boolean,
+      tempRuleAdded: boolean,
+      scratchPath: string,
+      signal?: AbortSignal,
+      project?: string,
+    ): Promise<UcmResult> {
+      return serialize(async () => {
+        const proj = target(project);
+        const codeToSend =
+          tempRuleAdded && ruleCode
+            ? scratchCode.replace(/\s+$/, "") + "\n\n" + ruleCode.trim() + "\n"
+            : scratchCode;
+
+        if (!rewrite) {
+          const { ok, md } = await runTranscript({
+            project: proj,
+            code: codeToSend,
+            commands: [`rewrite ${ruleName}`],
+            signal,
+          });
+          if (!ok) {
+            const err = errorText(md);
+            if (err.includes("I couldn't find any matches")) {
+              return finalize(`No matches found in ${scratchPath} for rewrite rule \`${ruleName}\`.`, false, {
+                pruneKey,
+              });
+            }
+            return finalize(err, true, { pruneKey });
+          }
+          if (md.includes("I couldn't find any matches")) {
+            return finalize(`No matches found in ${scratchPath} for rewrite rule \`${ruleName}\`.`, false, {
+              pruneKey,
+            });
+          }
+          const m = md.match(/I found and replaced matches in these definitions:\s*([^\n]+)/);
+          const matchedDefs = m ? m[1].trim().split(/\s+/) : [];
+          const text =
+            matchedDefs.length > 0
+              ? `Matches found in ${scratchPath} across definitions: ${matchedDefs.join(", ")}`
+              : `Matches found in ${scratchPath} for rewrite rule \`${ruleName}\`.`;
+          return finalize(text, false, { pruneKey, details: { matchedDefinitions: matchedDefs } });
+        }
+
+        const commands = commit
+          ? [`rewrite ${ruleName}`, `load`, `update`]
+          : [`rewrite ${ruleName}`, `load`];
+
+        const { ok, md, rewrittenCode } = await runTranscript({
+          project: proj,
+          code: codeToSend,
+          commands,
+          captureRewrite: true,
+          signal,
+        });
+
+        if (!ok) {
+          const err = errorText(md);
+          if (err.includes("I couldn't find any matches")) {
+            return finalize(`No matches found in ${scratchPath} for rewrite rule \`${ruleName}\`.`, false, {
+              pruneKey,
+            });
+          }
+          return finalize(err, true, { pruneKey });
+        }
+
+        if (md.includes("I couldn't find any matches")) {
+          return finalize(`No matches found in ${scratchPath} for rewrite rule \`${ruleName}\`.`, false, {
+            pruneKey,
+          });
+        }
+
+        const dump = addedByUcm(md);
+        let rawRewritten = dump || rewrittenCode;
+        if (!rawRewritten) {
+          return finalize(`Could not capture rewritten code for ${scratchPath}.`, true, { pruneKey });
+        }
+
+        // Clean up UCM's leading rewrite metadata comments
+        let finalCode = rawRewritten
+          .replace(/^-- \| Rewrote using:[^\n]*\n(?:-- \| Modified definition\(s\):[^\n]*\n)?\n*/m, "")
+          .trim();
+
+        // Clean up temporary rule if it was appended inline
+        if (tempRuleAdded) {
+          const escapedRule = ruleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          finalCode = finalCode
+            .replace(
+              new RegExp(
+                `(?:^[ \\t]*${escapedRule}\\s*:[\\s\\S]*?\\n)?^[ \\t]*${escapedRule}(\\s+[^=\\n]+)*\\s*=[\\s\\S]*?(?=\\n\\S|$)`,
+                "m",
+              ),
+              "",
+            )
+            .trim();
+        }
+
+        // Preserve leading project header if present in original scratchCode
+        const headerMatch = scratchCode.match(/^\s*--\s*@unison-project:\s*\S+/m);
+        if (headerMatch && !finalCode.includes(headerMatch[0])) {
+          finalCode = headerMatch[0] + "\n\n" + finalCode;
+        }
+
+        await writeFile(scratchPath, finalCode + "\n", "utf8");
+
+        const m = md.match(/I found and replaced matches in these definitions:\s*([^\n]+)/);
+        const matchedDefs = m ? m[1].trim().split(/\s+/) : [];
+
+        if (commit) {
+          const s = defSummary(md);
+          s.added = s.added.filter((n) => n !== ruleName);
+          s.modified = s.modified.filter((n) => n !== ruleName);
+          const total = s.added.length + s.modified.length;
+          const summary = total
+            ? `✓ Rewrote ${scratchPath} in place and committed to ${proj}: ${s.modified.length} modified, ${s.added.length} added definitions (names only):\n${formatDefs(s)}`
+            : `✓ Rewrote ${scratchPath} in place and committed to ${proj}.`;
+          return finalize(summary, false, {
+            details: { modifiedDefinitions: matchedDefs, committed: true },
+          });
+        }
+
+        const defsStr = matchedDefs.length > 0 ? ` (replaced in: ${matchedDefs.join(", ")})` : "";
+        const summary = `✓ Applied rewrite \`${ruleName}\` to ${scratchPath}${defsStr}.\n✓ ${scratchPath} typechecks cleanly.`;
+        return finalize(summary, false, {
+          details: { modifiedDefinitions: matchedDefs, committed: false },
+        });
       });
     },
 

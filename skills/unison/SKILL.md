@@ -126,7 +126,7 @@ console output. Practical consequences:
 | `unison_update` | typecheck + commit in one call |
 | `unison_view` | read (pretty-printed) source of existing definitions |
 | `unison_dump` | read **re-loadable** source of existing definitions (for editing) |
-| `unison_sfind` | search or search-and-replace codebase AST using `@rewrite` rules (`rewrite: true` commits) |
+| `unison_sfind` | search or search-and-replace AST in a scratch file (in place) or across the codebase using `@rewrite` rules |
 | `unison_find` | search by name, or `: <type>` for type-directed search |
 | `unison_test` | run the **committed** test suite — the only tool that reports pass/fail |
 | `unison_status` | show bound codebase, default project, available projects |
@@ -140,17 +140,22 @@ Choose the right search tool to minimize token usage and latency:
   - **When to use:** You want to discover what definitions exist by name fragment (`find gemm`) or find functions matching a type signature (`find : [a] -> Nat`).
   - **Token profile:** Very cheap, instantaneous index lookup.
 - **`unison_sfind` (AST / Syntax-Tree Pattern Matching & Replacement):**
-  - **When to use:** You need to find or replace actual code call sites or expression structures across the codebase (e.g. *"find every place calling `unsupportedMixedPrecision` with 3 arguments"* or *"rename all occurrences of `foo` to `bar`"*).
-  - **Search-only (`rewrite: false`, default):** Returns matching definition names. Keep rules concise (minimal variables, dummy `==> ()` RHS).
-  - **Search-and-replace (`rewrite: true`):** Stages matching definitions, executes the `@rewrite` rule, and commits changes in one step.
+  - **When to use:** You need to find or replace actual code call sites or expression structures in a scratch file or across the codebase (e.g. *"replace all occurrences of `x ^^ ᵀ` with `transpose x` in `scratch.u`"* or *"find every place calling `unsupportedMixedPrecision` with 3 arguments across the codebase"*).
+  - **Targeting a Scratch File on Disk (`scratchPath: "scratch.u"`):**
+    - `rewrite: false`: searches for pattern matches inside the scratch file.
+    - `rewrite: true`: applies the rewrite rule directly to the scratch file on disk **in place** (reloads and typechecks; does not commit).
+    - `commit: true`: rewrites in place and commits (`update`) to the codebase in one step.
+  - **Targeting the Codebase (`scratchPath` omitted):**
+    - `rewrite: false`: searches codebase AST and returns matching definition names.
+    - `rewrite: true`: stages all matching codebase definitions, executes the `@rewrite` rule, and commits changes in one step.
   - **Writing rules:** Provide a `@rewrite` pattern rule directly (`term`, `case`, or `signature`):
     ```unison
     findMixed a b c = @rewrite term (unsupportedMixedPrecision#abc1234 a b c) ==> ()
     ```
   - **Pattern variables vs. concrete identifiers:**
     - Arguments to the rule function (e.g. `rule a b = ...`) are treated as **pattern variables** (wildcards matching any expression).
-    - **Bare pattern variables match everything:** A rule like `rule x = @rewrite term x ==> ()` matches *every single term and sub-expression across the codebase*.
-    - **Keep concrete functions out of the parameter list:** To match calls to `myFunc`, do **not** declare `myFunc` as a rule argument (`rule myFunc x = ...` ❌ treats `myFunc` as a wildcard matching any function!). Instead write `rule x = @rewrite term (myFunc x) ==> ...` ✅ where `myFunc` is resolved as the concrete codebase definition and `x` binds the argument.
+    - **Bare pattern variables match everything:** A rule like `rule x = @rewrite term x ==> ()` matches *every single term and sub-expression*.
+    - **Keep concrete functions out of the parameter list:** To match calls to `myFunc`, do **not** declare `myFunc` as a rule argument (`rule myFunc x = ...` ❌ treats `myFunc` as a wildcard matching any function!). Instead write `rule x = @rewrite term (myFunc x) ==> ...` ✅ where `myFunc` is resolved as the concrete definition and `x` binds the argument.
     - **Zero-arg rules for direct term/alias replacement:** If simply replacing one term/identifier with another, pass zero rule arguments: `rule = @rewrite term oldFn ==> newFn`.
   - **Pinning with `name#hash`:** When refactoring a definition whose name or signature is changing, pin the term with `#hash` or `name#hash` (e.g. `foo#abc1234 a b`) so the matcher cryptographically identifies the old version across the codebase.
   - **Reference Guide:** See `references/rewrites.md` in this skill for the full reference on multi-clause `@rewrite` blocks (`term`, `case`, `signature`), capture avoidance, pattern variables, and `rewrite` (sfind.replace) examples.
@@ -158,7 +163,7 @@ Choose the right search tool to minimize token usage and latency:
 
 #### Recipe: Refactoring Code & Changing Signatures with `@rewrite`
 
-When refactoring terms, aliases, or signatures across the codebase:
+When refactoring terms, aliases, or signatures:
 
 1. **Find old definition / hash**: Run `unison_find myFn` (or note its `#hash` if signature changes).
 2. **Write the new definition and `@rewrite` rule**:
@@ -166,12 +171,24 @@ When refactoring terms, aliases, or signatures across the codebase:
    - For applied terms / signature changes: `migrateRule a b c = @rewrite term (myFn#a1b2c3d a b c) ==> myFn a c`
    *Why pinning works:* The LHS typechecks against the old term in the codebase, while the RHS typechecks against the new term.
 
-##### Option A: End-to-End via `unison_sfind` (Recommended)
+##### Option A: In-Place Scratch File Refactor
+To rewrite definitions inside a `.u` scratch file on disk without committing:
+```json
+unison_sfind {
+  "pattern": "r x = @rewrite term (transpose x) ==> (x ^^ ᵀ)",
+  "scratchPath": "scratch.u",
+  "rewrite": true
+}
+```
+*This updates `scratch.u` in place on disk and verifies that the rewritten file typechecks cleanly.*
+
+##### Option B: Codebase-Wide Refactor
+To rewrite definitions across the entire codebase and commit in one step:
 1. **Dry-run search**: `unison_sfind { pattern: "rule = @rewrite term oldFn ==> newFn" }` (or `rewrite: false`).
 2. **Execute refactor**: `unison_sfind { pattern: "rule = @rewrite term oldFn ==> newFn", rewrite: true }`.
-   *This automatically stages all matching definitions, runs `rewrite`, reloads (`load`), commits (`update`), and cleans up temporary rule terms.*
+   *This automatically stages all matching codebase definitions, runs `rewrite`, reloads (`load`), commits (`update`), and cleans up temporary rule terms.*
 
-##### Option B: Manual UCM Scratch-File Workflow
+##### Option C: Manual UCM Scratch-File Workflow
 1. **Find matches**: Run `sfind ruleName` in UCM (or `unison_sfind`).
 2. **Dump matches into scratch file**: Run `edit 1-N` (or dump them via `unison_dump`).
 3. **Apply the rewrite rule**: Run `rewrite ruleName` (or `sfind.replace ruleName`).
@@ -338,6 +355,38 @@ This is one of the easiest things to get wrong: an `ability` or helper that
 sits below `---` looks like it should be available, but isn't. If the
 typechecker reports an unresolved name for a definition that *is* in the
 file, scroll past the `---` — that definition is in the comment region.
+
+## Structural Search and Replace (`unison_sfind`)
+
+`unison_sfind` performs AST-based pattern matching and rewriting across a scratch file or the codebase using Unison's `@rewrite` rules.
+
+### `@rewrite` Rule Syntax
+
+A rewrite rule is a normal Unison definition that uses `@rewrite`:
+
+```unison
+-- Term replacement with variables
+r x = @rewrite term (LinearAlgebra.transpose x) ==> (x ^^ ᵀ)
+
+-- Term replacement without variables
+r = @rewrite term oldFn ==> newFn
+
+-- Signature replacement
+r x = @rewrite signature OldType ==> NewType
+```
+
+### Important Rules for `unison_sfind`
+
+1. **Rule must typecheck**: Both the left-hand side and right-hand side of `==>` must be valid, resolvable Unison code.
+2. **Top-level qualification & imports**: Inline rewrite patterns are evaluated at the file level. Always ensure identifiers and custom operators are fully qualified or preceded by `use` clauses:
+   ```unison
+   use math ^^ ᵀ
+   r x = @rewrite term (LinearAlgebra.transpose x) ==> (x ^^ ᵀ)
+   ```
+3. **Scratch file rewriting (`scratchPath`)**:
+   - `rewrite: false` (default): Reports definitions matching the rule without modifying the file.
+   - `rewrite: true`: Applies the transformation to the `.u` file in place and strips the temporary rule definition afterwards.
+   - `commit: true`: Rewrites the scratch file and commits the changes to the active project in one step.
 
 ## Common `unison_ucm` commands
 
