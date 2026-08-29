@@ -1,13 +1,16 @@
 ---
-name: unison
-description: Write Unison code and interact with a UCM (Unison Codebase Manager) codebase. Use whenever editing .u scratch files, adding/updating definitions, installing libraries, running tests via `test>` watch expressions or `unison_test`, or querying definitions. Covers the scratch-file workflow and the fact that definitions live in the codebase, not in files.
+name: ucm
+description: Interact with a UCM (Unison Codebase Manager) codebase through the unison_* tools. Use whenever editing .u scratch files, adding/updating definitions, installing libraries, running tests via `test>` watch expressions or `unison_test`, or querying definitions. Covers the scratch-file workflow and the fact that definitions live in the codebase, not in files. For Unison language syntax, types, and style, use the `unison-language` skill.
 ---
 
-# Unison + UCM
+# UCM + the Unison codebase
+
+For the language itself (syntax, abilities, data types, style, testing idioms) see
+the `unison-language` skill (`unison-language.md`). This skill is about driving UCM.
 
 ## Policy and Decisions
 
-Refer to `POLICY.md` for codebase commit policies. If you are unsure whether to prepare changes in a scratch file or commit them to the codebase, **ask what to do if not explicitly told**.
+Refer to `../POLICY.md` (repo root) for codebase commit policies. If you are unsure whether to prepare changes in a scratch file or commit them to the codebase, **ask what to do if not explicitly told**.
 
 ## The one rule that trips up file-based agents
 
@@ -158,7 +161,7 @@ Choose the right search tool to minimize token usage and latency:
     - **Keep concrete functions out of the parameter list:** To match calls to `myFunc`, do **not** declare `myFunc` as a rule argument (`rule myFunc x = ...` ❌ treats `myFunc` as a wildcard matching any function!). Instead write `rule x = @rewrite term (myFunc x) ==> ...` ✅ where `myFunc` is resolved as the concrete definition and `x` binds the argument.
     - **Zero-arg rules for direct term/alias replacement:** If simply replacing one term/identifier with another, pass zero rule arguments: `rule = @rewrite term oldFn ==> newFn`.
   - **Pinning with `name#hash`:** When refactoring a definition whose name or signature is changing, pin the term with `#hash` or `name#hash` (e.g. `foo#abc1234 a b`) so the matcher cryptographically identifies the old version across the codebase.
-  - **Reference Guide:** See `references/rewrites.md` in this skill for the full reference on multi-clause `@rewrite` blocks (`term`, `case`, `signature`), capture avoidance, pattern variables, and `rewrite` (sfind.replace) examples.
+  - **Reference Guide:** See `references/rewrites.md` (in `skills/references/`) for the full reference on multi-clause `@rewrite` blocks (`term`, `case`, `signature`), capture avoidance, pattern variables, and `rewrite` (sfind.replace) examples.
   - **Token profile:** Results are automatically deduplicated and pruned across turns.
 
 #### Recipe: Refactoring Code & Changing Signatures with `@rewrite`

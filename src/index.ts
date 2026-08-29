@@ -5,7 +5,7 @@
 //   #2 tiny tool catalog                                -> registerTool below
 //   #3 filter/summarize UCM output at the source        -> src/ucm.ts
 //   #4 fewer round trips (composite tools + auto-check)  -> unison_update + hook
-//   #5 knowledge in a skill, not the system prompt       -> skills/unison
+//   #5 knowledge in a skill, not the system prompt       -> skills/ucm.md + skills/unison-language.md
 //   #6 cache-friendly: stable prompt, no mid-run churn   -> per-turn injection
 //
 // Every tool accepts an optional `project` (project/branch) so a single session

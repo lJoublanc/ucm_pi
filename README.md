@@ -15,7 +15,9 @@ pi extension + skill and is built around six token-reduction strategies.
 | `src/index.ts` | Registers the tools, `/ucm` command, flags, and the token-saving event hooks |
 | `src/ucm.ts` | Transcript-backed UCM driver: runs `ucm transcript.in-place`, parses the clean `*.output.md`, filters/summarizes/truncates output |
 | `src/prune.ts` | `context` handler that stubs out superseded read-only results |
-| `skills/unison/SKILL.md` | The Unison/UCM workflow knowledge (loaded on demand) |
+| `skills/ucm.md` | UCM / codebase workflow knowledge (loaded on demand) |
+| `skills/unison-language.md` | The Unison language guide — syntax, abilities, style (loaded on demand) |
+| `skills/references/rewrites.md` | `@rewrite` / `unison_sfind` reference, linked from `skills/ucm.md` |
 
 ## Token strategy
 
