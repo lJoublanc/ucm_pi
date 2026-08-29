@@ -6,7 +6,8 @@ coding agent — **without MCP**.
 UCM ships an MCP server, but its tool catalog injects ~6,800 tokens of schemas
 into *every* request (29 tools), and every tool result accumulates in context
 and is re-sent on every turn. This extension implements the same capability as a
-pi extension + skill and is built around six token-reduction strategies.
+pi extension + two skills (`ucm` for driving UCM, `unison-language` for the language
+itself) and is built around six token-reduction strategies.
 
 ## What's inside
 
@@ -33,8 +34,8 @@ pi extension + skill and is built around six token-reduction strategies.
 4. **Fewer round trips.** `unison_update` typechecks *and* commits in one
    transcript; editing a `.u` file auto-appends fresh diagnostics to the edit
    result, so no separate typecheck turn (and no extra context re-send).
-5. **Knowledge in a skill,** not the system prompt — only the one-line
-   description is always in context.
+5. **Knowledge in skills,** not the system prompt — only each skill's one-line
+   description is always in context (`skills/ucm.md`, `skills/unison-language.md`).
 6. **Cache-friendly** — stable prompt and tool set; branch status goes in the
    footer, not the system prompt.
 
