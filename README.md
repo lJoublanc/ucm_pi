@@ -25,7 +25,9 @@ itself) and is built around six token-reduction strategies.
 1. **Prune stale results** (`src/prune.ts`). The `context` event fires before
    each LLM call; we walk messages newest-first and stub out any read-only
    Unison result (`view`/`find`/`typecheck`) superseded by a newer one with the
-   same `pruneKey`. This is the biggest win — MCP re-sends all of them forever.
+   same `pruneKey` — both `content` and `structuredContent`, so a pruned
+   result cannot leak back through a codemode script. This is the biggest
+   win — MCP re-sends all of them forever.
 2. **Tiny catalog** — a handful of high-signal tools instead of 29. Rare ops go
    through the one `unison_ucm` escape hatch.
 3. **Filter at the source** (`src/ucm.ts`). We parse UCM's `*.output.md`, return
@@ -38,6 +40,13 @@ itself) and is built around six token-reduction strategies.
    description is always in context (`skills/ucm.md`, `skills/unison-language.md`).
 6. **Cache-friendly** — stable prompt and tool set; branch status goes in the
    footer, not the system prompt.
+7. **Codemode-ready** (pi >= 0.99, opt-in). Every tool declares an
+   `outputSchema` and returns matching `structuredContent`, so `codemode`
+   scripts can call the `unison_*` tools in parallel and parse `{ names }`,
+   `{ committed, added, modified }`, `{ affectedDefinitions }` without
+   re-parsing prose. Read-only tools carry `readOnlyHint`, and all tools share
+   the `unison` namespace. The transcript backend is unchanged — no MCP
+   required; enable scripts with `"defaultTools": ["+codemode"]`.
 
 ## Install
 

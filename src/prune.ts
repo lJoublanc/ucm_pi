@@ -10,7 +10,24 @@
 // Only idempotent, re-runnable read tools are pruned. Mutations (update, raw,
 // test, run) are never touched — their history can be semantically important.
 
-const STUB = "[superseded by a newer result for the same target — re-run the tool if you need it again]";
+const STUB =
+  "[superseded by a newer result for the same target — re-run the tool if you need it again]";
+
+/**
+ * A pruned message must leave nothing extractable behind. Takes either an
+ * AgentMessage-shaped object or a tool_result event payload. Both `content`
+ * and `structuredContent` are cleared: the agent loop keeps `structuredContent`
+ * only when `content` is untouched, so clearing `content` alone silently drops
+ * the structured half, and a handler reacting after us reads the event, not the
+ * message. `details.pruneKey` is kept — it is a small dedupe id, not payload.
+ */
+export function stubPrunedResult<T extends { content?: unknown; structuredContent?: unknown }>(
+  m: T,
+): T {
+  if (Array.isArray(m.content)) m.content = [{ type: "text", text: STUB }];
+  if ("structuredContent" in m) m.structuredContent = { stubbed: true };
+  return m;
+}
 
 export function pruneStaleUnisonResults(messages: any[]): any[] {
   const seen = new Set<string>();
@@ -20,7 +37,7 @@ export function pruneStaleUnisonResults(messages: any[]): any[] {
     const key: unknown = m.details?.pruneKey;
     if (typeof key !== "string") continue; // only tools that opted in
     if (seen.has(key)) {
-      m.content = [{ type: "text", text: STUB }];
+      stubPrunedResult(m);
     } else {
       seen.add(key);
     }

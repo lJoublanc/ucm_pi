@@ -57,13 +57,27 @@ export interface UcmConfig {
 export interface UcmResult {
   /** Text sent to the LLM (already filtered + truncated). */
   text: string;
+  /** Untruncated filtered output; feeds `structuredContent` for codemode scripts. */
+  fullText: string;
   isError: boolean;
   /** Full, untruncated output on disk, if truncation happened. */
   fullOutputPath?: string;
   /** Stable key for context de-duplication (see prune.ts). Read-only tools only. */
   pruneKey?: string;
   details: Record<string, unknown>;
+  /** Machine-readable payload surfaced as `structuredContent` to codemode
+   *  scripts, alongside the full output text. Small extracted fields only —
+   *  name lists, flags, and failure closures' affected-definition sets — so
+   *  scripts can iterate results without re-parsing prose. JSON-typed (not
+   *  `unknown`) so it satisfies `AgentToolResult.structuredContent` without
+   *  a cast. Kept out of `details` so large payloads never persist into the
+   *  session transcript. */
+  data?: { [key: string]: Json };
 }
+
+/** Minimal JSON value: mirrors pi's `JsonValue` so `data` above typechecks
+ *  as `structuredContent` wherever pi expects it. */
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 // ---------------------------------------------------------------------------
 // Current-project detection from the UCM codebase
@@ -409,7 +423,8 @@ export function createUcm(config: UcmConfig) {
     isError: boolean,
     extra: Partial<UcmResult> = {},
   ): Promise<UcmResult> {
-    const t = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+    const fullText = text || "(no output)";
+    const t = truncateHead(fullText, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
     let content = t.content;
     let fullOutputPath: string | undefined;
     if (t.truncated) {
@@ -421,7 +436,7 @@ export function createUcm(config: UcmConfig) {
         `${formatSize(t.outputBytes)}/${formatSize(t.totalBytes)}. ` +
         `Full output: ${fullOutputPath} — read it only if you need more.]`;
     }
-    return { text: content || "(no output)", isError, fullOutputPath, details: {}, ...extra };
+    return { text: content || "(no output)", fullText, isError, fullOutputPath, details: {}, ...extra };
   }
 
   /** Resolve the project for a call: explicit arg → defaultProject thunk → "scratch/main". */
@@ -459,7 +474,10 @@ export function createUcm(config: UcmConfig) {
           ? `✓ Typechecks against ${proj}: ${s.added.length} to add, ${s.modified.length} to modify ` +
             `(names only — nothing committed):\n${formatDefs(s)}`
           : `✓ Typechecks against ${proj} (no new/changed definitions).`;
-        return finalize(summary, false, { pruneKey });
+        return finalize(summary, false, {
+          pruneKey,
+          data: { added: s.added, modified: s.modified },
+        });
       });
     },
 
@@ -532,6 +550,10 @@ export function createUcm(config: UcmConfig) {
           }
           return finalize(parts.join("\n\n"), true, {
             details: { affectedDefinitions: affected },
+            data: {
+              committed: false,
+              affectedDefinitions: affected,
+            },
           });
         }
 
@@ -542,7 +564,9 @@ export function createUcm(config: UcmConfig) {
             ? `✓ Committed to ${proj}: ${s.added.length} added, ${s.modified.length} modified ` +
               `(names only):\n${formatDefs(s)}`
             : ucmOutput(md) || `✓ update applied to ${proj}.`;
-          return finalize(summary, false);
+          return finalize(summary, false, {
+            data: { committed: true, added: s.added, modified: s.modified },
+          });
         }
         return finalize(errorText(md), true);
       });
@@ -661,6 +685,10 @@ export function createUcm(config: UcmConfig) {
             }
             return finalize(parts.join("\n\n"), true, {
               details: { affectedDefinitions: affected },
+              data: {
+                committed: false,
+                affectedDefinitions: affected,
+              },
             });
           }
 
@@ -674,6 +702,11 @@ export function createUcm(config: UcmConfig) {
               : ucmOutput(rewriteTranscript.md) || `✓ rewrite applied to ${proj}.`;
             return finalize(summary, false, {
               details: { modifiedDefinitions: s.modified, addedDefinitions: s.added },
+              data: {
+                committed: true,
+                added: s.added,
+                modified: s.modified,
+              },
             });
           }
           return finalize(errorText(rewriteTranscript.md), true);
@@ -693,9 +726,9 @@ export function createUcm(config: UcmConfig) {
             .filter(Boolean)
             .join("\n\n")
             .trim();
-          if (stripped) return finalize(stripped, false, { pruneKey });
+          if (stripped) return finalize(stripped, false, { pruneKey, data: { names } });
         }
-        return finalize(ucmOutput(md) || "(no matches found)", false, { pruneKey });
+        return finalize(ucmOutput(md) || "(no matches found)", false, { pruneKey, data: { names } });
       });
     },
 
@@ -746,7 +779,11 @@ export function createUcm(config: UcmConfig) {
             matchedDefs.length > 0
               ? `Matches found in ${scratchPath} across definitions: ${matchedDefs.join(", ")}`
               : `Matches found in ${scratchPath} for rewrite rule \`${ruleName}\`.`;
-          return finalize(text, false, { pruneKey, details: { matchedDefinitions: matchedDefs } });
+          return finalize(text, false, {
+            pruneKey,
+            details: { matchedDefinitions: matchedDefs },
+            data: { matchedDefinitions: matchedDefs },
+          });
         }
 
         const commands = commit
@@ -823,6 +860,12 @@ export function createUcm(config: UcmConfig) {
             : `✓ Rewrote ${scratchPath} in place and committed to ${proj}.`;
           return finalize(summary, false, {
             details: { modifiedDefinitions: matchedDefs, committed: true },
+            data: {
+              committed: true,
+              added: s.added,
+              modified: s.modified,
+              matchedDefinitions: matchedDefs,
+            },
           });
         }
 
@@ -830,6 +873,7 @@ export function createUcm(config: UcmConfig) {
         const summary = `✓ Applied rewrite \`${ruleName}\` to ${scratchPath}${defsStr}.\n✓ ${scratchPath} typechecks cleanly.`;
         return finalize(summary, false, {
           details: { modifiedDefinitions: matchedDefs, committed: false },
+          data: { committed: false, matchedDefinitions: matchedDefs },
         });
       });
     },
@@ -847,7 +891,13 @@ export function createUcm(config: UcmConfig) {
           commands: [command],
           signal,
         });
-        return finalize(ok ? ucmOutput(md) || "(no results)" : errorText(md), !ok, { pruneKey });
+        const text = ok ? ucmOutput(md) || "(no results)" : errorText(md);
+        return finalize(text, !ok, {
+          pruneKey,
+          // Numbered listings (`find`, `branches`, `docs`, …) yield harvestable
+          // names; prose output (`view`) yields none — both fine for scripts.
+          ...(ok ? { data: { names: parseNumberedNames(text) } } : {}),
+        });
       });
     },
 
@@ -871,6 +921,7 @@ export function createUcm(config: UcmConfig) {
         // the raw thunk used to stringify the function source into the output
         // and produce a broken transcript (empty project list).
         const proj = target();
+        const cb = codebase ?? "(UCM default)";
         const { ok, md } = await runTranscript({
           project: proj,
           commands: ["projects"],
@@ -878,8 +929,12 @@ export function createUcm(config: UcmConfig) {
         });
         const projects = ok ? ucmOutput(md) : errorText(md);
         return finalize(
-          `Codebase: ${codebase ?? "(UCM default)"}\nDefault project/branch: ${proj}\n\nProjects:\n${projects}`,
+          `Codebase: ${cb}\nDefault project/branch: ${proj}\n\nProjects:\n${projects}`,
           !ok,
+          // Parsed project list for scripts; the model reads the text above.
+          ok
+            ? { data: { codebase: cb, project: proj, projects: parseNumberedNames(projects) } }
+            : {},
         );
       });
     },

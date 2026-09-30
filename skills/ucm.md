@@ -121,6 +121,41 @@ console output. Practical consequences:
 - Prompt-echo lines (`proj/branch> cmd`) are stripped, and long output is
   truncated with a pointer to a full-output file on disk.
 
+### Codemode scripts (pi >= 0.99, opt-in)
+
+If the `codemode` tool is active (`"defaultTools": ["+codemode"]`), its
+scripts can call every `unison_*` tool in parallel and see only each script's
+own output — not the transcript's. Two things to know:
+
+- Scripts receive **structured data** where the tool declares it:
+  `unison_find` resolves to `{ names }`, `unison_update` to
+  `{ committed, added, modified }` or `{ committed: false, affectedDefinitions }`,
+  `unison_status` to `{ codebase, project, projects }`. Parse the fields;
+  do not re-parse the human-readable summary. Tools that return prose
+  still resolve to their text: with no `structuredContent` a script's
+  `tools.unison_view(...)` call returns the pretty-printed source as a
+  string — `text()` it straight through (confirmed in pi 0.99.1's
+  `toScriptValue`: schema-less tools resolve to text).
+- On an incomplete `unison_update`, the re-loadable affected-definition
+  source is in the human-readable half — read that half (or re-dump via
+  `unison_dump`) to build the fix-up, then resubmit with one `unison_update`
+  call. Narrow on `committed` to branch success vs. rollback.
+
+```js
+// @options: {"max_output_tokens": 4000}
+const [view, found] = await Promise.all([
+  tools.unison_view({ names: "List.map" }),
+  tools.unison_find({ query: "fold" }),
+]);
+// view resolves to its text content (unison_view's schema carries only
+// extracted `names`); found resolves to structured `{ names }`.
+text(view + "\n\n---\n\n" + found.names.join("\n"));
+```
+
+Codemode is optional. Direct tool calls behave exactly as documented below;
+the scripts above are a token-saving alternative for parallel reads, not a
+replacement for the workflow.
+
 ## Tools
 
 | Tool | Use for |

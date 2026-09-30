@@ -16,7 +16,69 @@ import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createUcm, detectCurrentProject, type Ucm } from "./ucm.ts";
-import { pruneStaleUnisonResults } from "./prune.ts";
+import { pruneStaleUnisonResults, stubPrunedResult } from "./prune.ts";
+
+// Codemode scripts (`codemode` tool, pi >= 0.99) do not see `content` — they
+// receive `structuredContent` (the `data` half of a UcmResult) resolved as the
+// tool call's value. Schemas below describe exactly that half: small extracted
+// fields (names, flags) that scripts can iterate without re-parsing prose.
+// Tools without `outputSchema` still work from scripts, resolving to their
+// text `content` instead.
+const UNISON_NS = {
+  name: "unison",
+  description: "Unison codebase tools (transcript-backed, token-filtered)",
+} as const;
+
+const READONLY = { readOnlyHint: true, idempotentHint: true } as const;
+
+const TypecheckData = Type.Object({
+  added: Type.Optional(Type.Array(Type.String())),
+  modified: Type.Optional(Type.Array(Type.String())),
+});
+
+// unison_update resolves to one of:
+//   success   -> { committed: true, added, modified }
+//   incomplete (rolled back) -> { committed: false, affectedDefinitions }
+//   plain error -> {} (only `content` carries the failure)
+// All-optional so error results still validate; scripts narrow on `committed`.
+const UpdateData = Type.Object({
+  committed: Type.Optional(Type.Boolean()),
+  added: Type.Optional(Type.Array(Type.String())),
+  modified: Type.Optional(Type.Array(Type.String())),
+  affectedDefinitions: Type.Optional(Type.Array(Type.String())),
+});
+
+const QueryData = Type.Object({
+  // Harvested from numbered listings (`find`, `branches`, `docs` …); empty
+  // for prose output (`view`), whose text the script already receives.
+  // Absent on error results — only `content` carries the failure.
+  names: Type.Optional(Type.Array(Type.String())),
+});
+
+// The sfind tool resolves to different shapes per mode:
+//   codebase search-only -> { names }
+//   codebase rewrite ok  -> { committed: true, added, modified }
+//   codebase rewrite fail / scratch rewrite fail -> { committed: false, affectedDefinitions }
+//   scratch search-only / rewrite -> { matchedDefinitions, committed? }
+// One all-optional schema covers every path, including `{}` error results.
+const SfindData = Type.Object({
+  names: Type.Optional(Type.Array(Type.String())),
+  committed: Type.Optional(Type.Boolean()),
+  added: Type.Optional(Type.Array(Type.String())),
+  modified: Type.Optional(Type.Array(Type.String())),
+  affectedDefinitions: Type.Optional(Type.Array(Type.String())),
+  matchedDefinitions: Type.Optional(Type.Array(Type.String())),
+});
+
+const StatusData = Type.Object({
+  codebase: Type.Optional(Type.String()),
+  project: Type.Optional(Type.String()),
+  projects: Type.Optional(Type.Array(Type.String())),
+});
+
+const TestData = Type.Object({});
+
+const RawData = Type.Object({});
 
 const PROJECT_PARAM = Type.Optional(
   Type.String({
@@ -72,13 +134,19 @@ export default function (pi: ExtensionAPI) {
 
   const toResult = (r: Awaited<ReturnType<Ucm["typecheck"]>>) => {
     if (r.isError) throw new Error(r.text); // sets isError + reports to LLM
-    return { content: [{ type: "text" as const, text: r.text }], details: r.details };
+    return {
+      content: [{ type: "text" as const, text: r.text }],
+      structuredContent: r.data ?? {},
+      details: r.details,
+    };
   };
   // Non-throwing variant: delivers content (and isError) rather than throwing,
   // so rich payloads — an update's affected-definition dump, a failed query —
-  // reach the model intact. Carries pruneKey into details for #1.
+  // reach the model intact. Carries pruneKey into details for #1 and the
+  // script-facing half as structuredContent for codemode (pi >= 0.99).
   const toResultKeyed = (r: Awaited<ReturnType<Ucm["typecheck"]>>) => ({
     content: [{ type: "text" as const, text: r.text }],
+    structuredContent: r.data ?? {},
     details: { ...r.details, pruneKey: r.pruneKey },
     isError: r.isError,
   });
@@ -88,6 +156,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_typecheck",
     label: "Unison Typecheck",
+    namespace: { ...UNISON_NS },
+    annotations: { ...READONLY },
+    outputSchema: TypecheckData,
     description:
       "Typecheck Unison source WITHOUT committing it. Returns only compiler diagnostics. " +
       "Run this after writing/editing definitions and before claiming code works.",
@@ -127,6 +198,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_update",
     label: "Unison Update",
+    namespace: { ...UNISON_NS },
+    // Commits: deliberately no readOnlyHint, so permission extensions
+    // confirm like any other mutating tool.
+    outputSchema: UpdateData,
     description:
       "Typecheck AND commit Unison source to the codebase in one step. " +
       "Prefer this over separate typecheck+add/update calls. If the change would " +
@@ -174,6 +249,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_view",
     label: "Unison View",
+    namespace: { ...UNISON_NS },
+    annotations: { ...READONLY },
+    outputSchema: QueryData,
     description:
       "Show the source of definitions from the codebase (definitions do NOT live in files — " +
       "never use grep/read for codebase contents). Accepts names, e.g. `List.map base.Nat.gt`.",
@@ -197,6 +275,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_dump",
     label: "Unison Dump",
+    namespace: { ...UNISON_NS },
+    annotations: { ...READONLY },
+    outputSchema: QueryData,
     description:
       "Dump canonical, RE-LOADABLE source of existing definitions (via `edit.new`). " +
       "Unlike unison_view's pretty-printer, this output round-trips cleanly through " +
@@ -222,6 +303,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_find",
     label: "Unison Find",
+    namespace: { ...UNISON_NS },
+    annotations: { ...READONLY },
+    outputSchema: QueryData,
     description:
       "Search the codebase for definitions by name fragment or by type signature " +
       "(use `find` for names, `find : <type>` for type-directed search).",
@@ -241,6 +325,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_sfind",
     label: "Unison Structured Find",
+    namespace: { ...UNISON_NS },
+    // Read path (search-only) is idempotent; the rewrite path commits.
+    // Marking readOnly would gate legitimate rewrites, marking destructive
+    // would prompt-gate pure searches — leave unset, like unison_update.
+    outputSchema: SfindData,
     description:
       "Search or search-and-replace the codebase or a scratch file AST using a structural pattern / @rewrite rule " +
       "(e.g. `r a b = @rewrite term (foo a b) ==> ()` or `r x = @rewrite term (x + 1) ==> (Nat.increment x)`). " +
@@ -374,6 +463,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_test",
     label: "Unison Test",
+    namespace: { ...UNISON_NS },
+    outputSchema: TestData,
     description: "Run the project's test suite and return the results.",
     promptSnippet: "Run the Unison project's tests",
     parameters: Type.Object({ project: PROJECT_PARAM }),
@@ -385,6 +476,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_status",
     label: "Unison Status",
+    namespace: { ...UNISON_NS },
+    annotations: { ...READONLY },
+    outputSchema: StatusData,
     description:
       "Show which codebase and default project/branch the Unison tools are bound to, " +
       "plus the list of projects in the codebase. Use this to orient before other tools " +
@@ -399,6 +493,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "unison_ucm",
     label: "UCM Command",
+    namespace: { ...UNISON_NS },
+    outputSchema: RawData,
     description:
       "Escape hatch: run raw UCM command(s) (e.g. `lib.install @unison/base`, `merge /topic`, " +
       "`branches`, `docs List.map`, `run myMain`, `delete.term foo`). One command per array entry.",
@@ -415,7 +511,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- #1: prune stale read-only results before every LLM call -----------
+  // Walk newest-first; stub any read-only Unison result superseded by a newer
+  // one with the same pruneKey. Codemode scripts see pruned results as the
+  // STUB text plus `{ stubbed: true }` structured content, so `structuredContent`
+  // cannot be used to bypass the stub — a script that needs the text re-runs
+  // the tool.
   pi.on("context", (event) => ({ messages: pruneStaleUnisonResults(event.messages) }));
+
+  // A tool_result handler that replaces `content` without also returning
+  // `structuredContent` drops the structured half (agent-loop keeps it only
+  // when `content` is untouched). Preserve ours so the auto-typecheck
+  // appendix never strips the edit's own structuredContent.
 
   // ---- #4: auto-typecheck on .u edits (saves a whole round trip) ----------
   // When the model writes/edits a scratch file, append fresh diagnostics to the
@@ -443,6 +549,9 @@ export default function (pi: ExtensionAPI) {
           ...event.content,
           { type: "text", text: `\n── unison typecheck (${path} @ ${proj}) ──\n${diag.text}` },
         ],
+        ...(event.structuredContent !== undefined
+          ? { structuredContent: event.structuredContent }
+          : {}),
       };
     } catch {
       return; // never break the underlying edit on typecheck failure
