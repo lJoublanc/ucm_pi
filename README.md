@@ -51,7 +51,7 @@ itself) and is built around six token-reduction strategies.
 ## Install
 
 ```bash
-pi install git:github.com/you/ucm_pi
+pi install git:github.com/ljoublanc/ucm_pi
 # or point settings.json at a local checkout:
 #   { "extensions": ["/path/to/ucm_pi/src/index.ts"],
 #     "skills":     ["/path/to/ucm_pi/skills"] }
